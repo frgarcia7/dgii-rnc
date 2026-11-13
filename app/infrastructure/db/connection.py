@@ -22,6 +22,11 @@ class PostgresConnectionManager:
         self._settings = settings
         self._pool: ThreadedConnectionPool | None = None
 
+    @property
+    def statement_timeout_ms(self) -> int:
+        """Timeout configurado para consultas de usuario."""
+        return self._settings.statement_timeout_ms
+
     def _get_pool(self) -> ThreadedConnectionPool:
         if self._pool is None:
             self._pool = ThreadedConnectionPool(
@@ -52,7 +57,8 @@ class PostgresConnectionManager:
             close_conn = bool(conn.closed)
             raise
         finally:
-            pool.putconn(conn, close=close_conn)
+            if self._pool is not None:
+                pool.putconn(conn, close=close_conn)
 
     def close(self) -> None:
         """Cierra todas las conexiones activas del pool."""
@@ -60,4 +66,3 @@ class PostgresConnectionManager:
             self._pool.closeall()
             self._pool = None
             logger.info("Pool de conexiones a PostgreSQL cerrado.")
-

@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Consulta RNC DGII — Padrón Empresarial RD</title>
+  <style>
+    :root {
+      --bg: #f4f6f9;
+      --surface: #ffffff;
+      --surface-alt: #f8fafc;
+      --text: #0f172a;
+      --muted: #475569;
+      --border: #e2e8f0;
+      --primary: #0b4f8a;
+      --primary-hover: #083d6b;
+      --accent: #ce1126;
+      --ok-bg: #dcfce7;
+      --ok-fg: #166534;
+      --warn-bg: #fef3c7;
+      --warn-fg: #92400e;
+      --bad-bg: #fee2e2;
+      --bad-fg: #991b1b;
+      --info-bg: #e0f2fe;
+      --info-fg: #075985;
+      --radius: 10px;
+      --shadow: 0 2px 10px rgba(15, 23, 42, 0.06);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    .topbar {
+      background: linear-gradient(135deg, #0b3b69 0%, #0b4f8a 100%);
+      color: #fff;
+      padding: 18px 24px;
+      border-bottom: 3px solid var(--accent);
+    }
+    .topbar-inner {
+      max-width: 1060px;
+      margin: 0 auto;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .brand h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .brand p {
+      margin: 2px 0 0;
+      font-size: 0.85rem;
+      color: rgba(255, 255, 255, 0.85);
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .nav-links a, .nav-links button {
+      color: #fff;
+      text-decoration: none;
+      font-size: 0.85rem;
+      padding: 6px 12px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      background: rgba(255, 255, 255, 0.08);
+      cursor: pointer;
+    }
+    .nav-links a:hover, .nav-links button:hover {
+      background: rgba(255, 255, 255, 0.18);
+    }
+
+    .container {
+      max-width: 1060px;
+      margin: 22px auto 48px;
+      padding: 0 16px;
+    }
+
+    .status-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      margin-bottom: 18px;
+      box-shadow: var(--shadow);
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+    .status-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .tab-btn {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
+      padding: 9px 16px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.92rem;
+      cursor: pointer;
+    }
+    .tab-btn.active {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      box-shadow: var(--shadow);
+      margin-bottom: 18px;
+    }
+
+    .search-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .search-row input[type="text"] {
+      flex: 1 1 280px;
+      padding: 11px 14px;
+      font-size: 1rem;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      outline: none;
+    }
+    .search-row input[type="text"]:focus,
+    .filters select:focus,
+    textarea:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(11, 79, 138, 0.14);
+    }
+
+    .btn {
+      padding: 10px 18px;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      background: var(--primary);
+      color: #fff;
+    }
+    .btn:hover { background: var(--primary-hover); }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn-secondary {
+      background: var(--surface-alt);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { background: #e2e8f0; }
+    .btn-sm {
+      padding: 5px 10px;
+      font-size: 0.8rem;
+      border-radius: 6px;
+    }
+
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+      align-items: center;
+      font-size: 0.86rem;
+      color: var(--muted);
+    }
+    .filters select {
+      padding: 6px 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      background: #fff;
+      font-size: 0.86rem;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 120px;
+      padding: 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.9rem;
+      resize: vertical;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .badge-ok { background: var(--ok-bg); color: var(--ok-fg); }
+    .badge-warn { background: var(--warn-bg); color: var(--warn-fg); }
+    .badge-bad { background: var(--bad-bg); color: var(--bad-fg); }
+    .badge-info { background: var(--info-bg); color: var(--info-fg); }
+
+    .result-card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      background: var(--surface-alt);
+      margin-top: 12px;
+    }
+    .result-header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .result-title {
+      margin: 0;
+      font-size: 1.05rem;
+      font-weight: 700;
+    }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 10px;
+      font-size: 0.88rem;
+    }
+    .meta-label {
+      display: block;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+      margin-top: 12px;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      background: var(--surface-alt);
+    }
+
+    .pagination {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 14px;
+      font-size: 0.88rem;
+      color: var(--muted);
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .hidden { display: none; }
+    .alert {
+      padding: 12px 14px;
+      border-radius: 8px;
+      margin-top: 12px;
+      font-size: 0.9rem;
+    }
+    .alert-info { background: var(--info-bg); color: var(--info-fg); }
+    .alert-warn { background: var(--warn-bg); color: var(--warn-fg); }
+    .alert-bad { background: var(--bad-bg); color: var(--bad-fg); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .footer {
+      text-align: center;
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 28px;
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <h1>Consulta RNC / Cédula — DGII RD</h1>
+        <p>Buscador empresarial local del padrón de contribuyentes</p>
+      </div>
+      <nav class="nav-links">
+        <a href="/docs">Swagger UI</a>
+        <a href="/redoc">ReDoc</a>
+        <button type="button" id="apiKeyBtn" title="Configurar API Key si la instancia la requiere">API Key</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="status-bar" id="statusBar">
+      <div class="status-pills">
+        <span id="statusBadge" class="badge badge-info">Conectando...</span>
+        <span id="statsText">Cargando estado del padrón...</span>
+      </div>
+      <span id="lastSyncText"></span>
+    </section>
+
+    <div class="tabs">
+      <button class="tab-btn active" type="button" data-tab="single">Consulta Individual</button>
+      <button class="tab-btn" type="button" data-tab="batch">Validación en Lote (606 / 607)</button>
+    </div>
+
+    <section id="tab-single" class="card">
+      <form id="singleForm">
+        <div class="search-row">
+          <input
+            type="text"
+            id="queryInput"
+            placeholder="Escribe un RNC (ej. 130-66304-1), Cédula o Razón Social (ej. Banco Popular)..."
+            autocomplete="off"
+            required
+          />
+          <button class="btn" type="submit" id="searchBtn">Buscar</button>
+        </div>
+        <div class="filters">
+          <span>Filtros (búsqueda por nombre):</span>
+          <select id="estatusFilter">
+            <option value="">Estatus: Todos</option>
+            <option value="ACTIVO">ACTIVO</option>
+            <option value="SUSPENDIDO">SUSPENDIDO</option>
+            <option value="DADO DE BAJA">DADO DE BAJA</option>
+          </select>
+          <select id="regimenFilter">
+            <option value="">Régimen: Todos</option>
+            <option value="NORMAL">NORMAL</option>
+            <option value="RST">RST</option>
+            <option value="ESPECIAL">ESPECIAL</option>
+          </select>
+          <button class="btn btn-secondary btn-sm" type="button" id="clearBtn">Limpiar</button>
+        </div>
+      </form>
+      <div id="singleOutput"></div>
+    </section>
+
+    <section id="tab-batch" class="card hidden">
+      <form id="batchForm">
+        <label for="batchInput" style="display:block;font-weight:600;margin-bottom:8px;">
+          Pega hasta 200 RNCs o Cédulas (uno por línea, o separados por coma):
+        </label>
+        <textarea id="batchInput" placeholder="130-66304-1&#10;101010101&#10;00112345678"></textarea>
+        <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;">
+          <button class="btn" type="submit" id="batchBtn">Consultar Lote</button>
+          <button class="btn btn-secondary hidden" type="button" id="exportCsvBtn">Exportar CSV</button>
+        </div>
+      </form>
+      <div id="batchOutput"></div>
+    </section>
+
+    <p class="footer">
+      Herramienta de código abierto basada en el padrón público oficial publicado por la Dirección General de Impuestos Internos (DGII). No es un portal oficial de la DGII.
+    </p>
+  </main>
+
+  <script>
+    const API_BASE = "/api/v1";
+    let currentOffset = 0;
+    const PAGE_LIMIT = 20;
+    let lastBatchData = null;
+
+    function getApiHeaders() {
+      const key = sessionStorage.getItem("dgii_api_key");
+      return key ? { "X-API-Key": key } : {};
+    }
+
+    async function apiFetch(path, options = {}) {
+      const headers = { ...(options.headers || {}), ...getApiHeaders() };
+      const resp = await fetch(`${API_BASE}${path}`, { ...options, headers });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data.detail || `Error HTTP ${resp.status}`);
+      }
+      return data;
+    }
+
+    function statusBadgeClass(estatus) {
+      const val = (estatus || "").toUpperCase();
+      if (val === "ACTIVO") return "badge badge-ok";
+      if (val === "SUSPENDIDO") return "badge badge-warn";
+      if (val.includes("BAJA") || val.includes("CESE")) return "badge badge-bad";
+      return "badge badge-info";
+    }
+
+    function el(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined && text !== null) node.textContent = String(text);
+      return node;
+    }
+
+    function copyButton(value, label) {
+      const btn = el("button", "btn btn-secondary btn-sm", label);
+      btn.type = "button";
+      btn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          btn.textContent = "Copiado";
+          setTimeout(() => { btn.textContent = label; }, 1200);
+        } catch {
+          btn.textContent = value;
+        }
+      });
+      return btn;
+    }
+
+    function renderContribuyenteCard(item, validation = null) {
+      const card = el("div", "result-card");
+      const header = el("div", "result-header");
+      const left = el("div");
+      left.appendChild(el("h3", "result-title", item.razon_social));
+
+      const badges = el("div", "");
+      badges.style.display = "flex";
+      badges.style.gap = "6px";
+      badges.style.flexWrap = "wrap";
+      badges.style.marginTop = "6px";
+      badges.appendChild(el("span", statusBadgeClass(item.estatus), item.estatus || "N/D"));
+      badges.appendChild(el("span", "badge badge-info", `${item.tipo} · ${item.regimen || "N/D"}`));
+      if (validation) {
+        badges.appendChild(
+          el(
+            "span",
+            validation.digito_verificador_valido ? "badge badge-ok" : "badge badge-warn",
+            validation.digito_verificador_valido ? "Dígito verificador válido" : "Dígito verificador inusual"
+          )
+        );
+      }
+      left.appendChild(badges);
+
+      const actions = el("div");
+      actions.style.display = "flex";
+      actions.style.gap = "6px";
+      actions.appendChild(copyButton(item.rnc, `Copiar ${item.rnc}`));
+      if (item.rnc_formateado && item.rnc_formateado !== item.rnc) {
+        actions.appendChild(copyButton(item.rnc_formateado, `Copiar ${item.rnc_formateado}`));
+      }
+
+      header.appendChild(left);
+      header.appendChild(actions);
+      card.appendChild(header);
+
+      const grid = el("div", "meta-grid");
+      const fields = [
+        ["RNC / Cédula", `${item.rnc_formateado || item.rnc} (${item.rnc})`],
+        ["Actividad Económica", item.actividad_economica || "No especificada"],
+        ["Inicio de Operaciones", item.fecha_inicio_operaciones || "No registrada"],
+        ["Último Cambio", item.updated_at ? new Date(item.updated_at).toLocaleString() : "N/D"],
+      ];
+      for (const [k, v] of fields) {
+        const cell = el("div");
+        cell.appendChild(el("span", "meta-label", k));
+        cell.appendChild(el("span", "", v));
+        grid.appendChild(cell);
+      }
+      card.appendChild(grid);
+      return card;
+    }
+
+    function looksLikeRnc(raw) {
+      const stripped = raw.replace(/[\s-]/g, "");
+      return /^\d{5,20}$/.test(stripped);
+    }
+
+    async function runSingleSearch(offset = 0) {
+      const output = document.getElementById("singleOutput");
+      const raw = document.getElementById("queryInput").value.trim();
+      if (!raw) return;
+
+      currentOffset = offset;
+      output.replaceChildren(el("div", "alert alert-info", "Consultando..."));
+
+      try {
+        if (looksLikeRnc(raw)) {
+          const data = await apiFetch(`/rnc/${encodeURIComponent(raw)}/validar`);
+          output.replaceChildren();
+          if (data.contribuyente) {
+            output.appendChild(renderContribuyenteCard(data.contribuyente, data));
+          } else {
+            const box = el("div", "alert alert-warn");
+            box.textContent =
+              `No se encontró el ${data.tipo} ${data.rnc_formateado} en el padrón local. ` +
+              `Formato válido: ${data.formato_valido ? "Sí" : "No"} · ` +
+              `Dígito verificador: ${data.digito_verificador_valido ? "Válido" : "Inválido"}.`;
+            output.appendChild(box);
+          }
+          return;
+        }
+
+        const params = new URLSearchParams({
+          query: raw,
+          limit: String(PAGE_LIMIT),
+          offset: String(offset),
+        });
+        const estatus = document.getElementById("estatusFilter").value;
+        const regimen = document.getElementById("regimenFilter").value;
+        if (estatus) params.set("estatus", estatus);
+        if (regimen) params.set("regimen", regimen);
+
+        const data = await apiFetch(`/buscar?${params.toString()}`);
+        output.replaceChildren();
+
+        if (!data.results.length) {
+          output.appendChild(el("div", "alert alert-warn", "No se encontraron contribuyentes con ese criterio."));
+          return;
+        }
+
+        const summary = el("div", "pagination");
+        summary.appendChild(
+          el(
+            "span",
+            "",
+            `Mostrando ${offset + 1}–${offset + data.count} de ${data.total.toLocaleString()} resultados`
+          )
+        );
+        output.appendChild(summary);
+
+        for (const item of data.results) {
+          output.appendChild(renderContribuyenteCard(item));
+        }
+
+        if (offset > 0 || data.has_more) {
+          const pager = el("div", "pagination");
+          const prevBtn = el("button", "btn btn-secondary btn-sm", "Anterior");
+          prevBtn.disabled = offset === 0;
+          prevBtn.addEventListener("click", () => runSingleSearch(Math.max(0, offset - PAGE_LIMIT)));
+
+          const nextBtn = el("button", "btn btn-secondary btn-sm", "Siguiente");
+          nextBtn.disabled = !data.has_more;
+          nextBtn.addEventListener("click", () => runSingleSearch(offset + PAGE_LIMIT));
+
+          pager.appendChild(prevBtn);
+          pager.appendChild(nextBtn);
+          output.appendChild(pager);
+        }
+      } catch (err) {
+        output.replaceChildren(el("div", "alert alert-bad", err.message));
+      }
+    }
+
+    async function runBatchLookup() {
+      const raw = document.getElementById("batchInput").value;
+      const rncs = raw.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean);
+      const output = document.getElementById("batchOutput");
+      const exportBtn = document.getElementById("exportCsvBtn");
+      exportBtn.classList.add("hidden");
+
+      if (!rncs.length) {
+        output.replaceChildren(el("div", "alert alert-warn", "Pega al menos un RNC o Cédula."));
+        return;
+      }
+
+      output.replaceChildren(el("div", "alert alert-info", `Consultando ${rncs.length} registros...`));
+      try {
+        const data = await apiFetch("/rnc/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rncs }),
+        });
+        lastBatchData = data;
+        output.replaceChildren();
+
+        output.appendChild(
+          el(
+            "div",
+            "alert alert-info",
+            `Procesados: ${data.requested} · Encontrados: ${data.found_count} · No encontrados: ${data.not_found.length} · Inválidos: ${data.invalid.length}`
+          )
+        );
+
+        if (data.results.length) {
+          exportBtn.classList.remove("hidden");
+          const table = el("table");
+          const thead = el("thead");
+          const hr = el("tr");
+          for (const h of ["RNC", "Razón Social", "Estatus", "Régimen", "Actividad"]) {
+            hr.appendChild(el("th", "", h));
+          }
+          thead.appendChild(hr);
+          table.appendChild(thead);
+
+          const tbody = el("tbody");
+          for (const item of data.results) {
+            const tr = el("tr");
+            tr.appendChild(el("td", "mono", item.rnc_formateado || item.rnc));
+            tr.appendChild(el("td", "", item.razon_social));
+            const tdEst = el("td");
+            tdEst.appendChild(el("span", statusBadgeClass(item.estatus), item.estatus));
+            tr.appendChild(tdEst);
+            tr.appendChild(el("td", "", item.regimen));
+            tr.appendChild(el("td", "", item.actividad_economica));
+            tbody.appendChild(tr);
+          }
+          table.appendChild(tbody);
+          output.appendChild(table);
+        }
+
+        if (data.not_found.length) {
+          output.appendChild(
+            el("div", "alert alert-warn", `No encontrados en padrón: ${data.not_found.join(", ")}`)
+          );
+        }
+        if (data.invalid.length) {
+          output.appendChild(
+            el("div", "alert alert-bad", `Formato inválido: ${data.invalid.join(", ")}`)
+          );
+        }
+      } catch (err) {
+        output.replaceChildren(el("div", "alert alert-bad", err.message));
+      }
+    }
+
+    function exportBatchCsv() {
+      if (!lastBatchData) return;
+      const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+      const lines = [["RNC", "RNC_FORMATEADO", "TIPO", "RAZON_SOCIAL", "ESTATUS", "REGIMEN", "ACTIVIDAD_ECONOMICA"].join(",")];
+      for (const item of lastBatchData.results) {
+        lines.push([
+          esc(item.rnc),
+          esc(item.rnc_formateado),
+          esc(item.tipo),
+          esc(item.razon_social),
+          esc(item.estatus),
+          esc(item.regimen),
+          esc(item.actividad_economica),
+        ].join(","));
+      }
+      for (const nf of lastBatchData.not_found) {
+        lines.push([esc(nf), "", "", esc("NO ENCONTRADO"), "", "", ""].join(","));
+      }
+      const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "consulta_dgii_lote.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    async function loadStatus() {
+      const badge = document.getElementById("statusBadge");
+      const statsText = document.getElementById("statsText");
+      const syncText = document.getElementById("lastSyncText");
+      try {
+        const health = await fetch("/health").then((r) => r.json());
+        if (health.initializing) {
+          badge.className = "badge badge-warn";
+          badge.textContent = "Cargando padrón inicial...";
+        } else if (health.catalog_ready) {
+          badge.className = "badge badge-ok";
+          badge.textContent = "En línea";
+        } else {
+          badge.className = "badge badge-warn";
+          badge.textContent = "Base de datos vacía";
+        }
+        statsText.textContent = `${Number(health.total_contribuyentes || 0).toLocaleString()} contribuyentes indexados`;
+
+        const stats = await apiFetch("/stats");
+        if (stats.last_sync) {
+          const dt = stats.last_sync.finished_at || stats.last_sync.started_at;
+          syncText.textContent = `Último sync (${stats.last_sync.status}): ${dt ? new Date(dt).toLocaleString() : ""}`;
+        }
+      } catch {
+        badge.className = "badge badge-info";
+        badge.textContent = "Auth requerida / Conectado";
+        statsText.textContent = "Configura tu API Key si el servidor la solicita.";
+      }
+    }
+
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        const tab = btn.dataset.tab;
+        document.getElementById("tab-single").classList.toggle("hidden", tab !== "single");
+        document.getElementById("tab-batch").classList.toggle("hidden", tab !== "batch");
+      });
+    });
+
+    document.getElementById("singleForm").addEventListener("submit", (e) => {
+      e.preventDefault();
+      runSingleSearch(0);
+    });
+    document.getElementById("batchForm").addEventListener("submit", (e) => {
+      e.preventDefault();
+      runBatchLookup();
+    });
+    document.getElementById("exportCsvBtn").addEventListener("click", exportBatchCsv);
+    document.getElementById("clearBtn").addEventListener("click", () => {
+      document.getElementById("queryInput").value = "";
+      document.getElementById("estatusFilter").value = "";
+      document.getElementById("regimenFilter").value = "";
+      document.getElementById("singleOutput").replaceChildren();
+    });
+    document.getElementById("apiKeyBtn").addEventListener("click", () => {
+      const current = sessionStorage.getItem("dgii_api_key") || "";
+      const next = prompt("Ingresa X-API-Key (deja vacío para limpiar):", current);
+      if (next === null) return;
+      if (next.trim()) sessionStorage.setItem("dgii_api_key", next.trim());
+      else sessionStorage.removeItem("dgii_api_key");
+      loadStatus();
+    });
+
+    loadStatus();
+  </script>
+</body>
+</html>
+

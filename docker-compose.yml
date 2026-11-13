@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-dgii_password}
       POSTGRES_DB: ${DB_NAME:-dgii_rnc}
     ports:
-      - "5432:5432"
+      - "${DB_BIND_HOST:-127.0.0.1}:${DB_EXTERNAL_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
@@ -28,17 +28,31 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DB_HOST: postgres
-      DB_PORT: 5432
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
       DB_USER: ${DB_USER:-dgii_user}
       DB_PASSWORD: ${DB_PASSWORD:-dgii_password}
       DB_NAME: ${DB_NAME:-dgii_rnc}
+      DB_POOL_MIN: ${DB_POOL_MIN:-1}
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
+      DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-5000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DGII_RNC_URL: ${DGII_RNC_URL:-https://dgii.gov.do/app/WebApps/Consultas/RNC/RNC_CONTRIBUYENTES.zip}
+      DGII_LOCAL_ZIP_PATH: ${DGII_LOCAL_ZIP_PATH:-}
+      DGII_HTTP_RETRIES: ${DGII_HTTP_RETRIES:-3}
+      SYNC_BATCH_SIZE: ${SYNC_BATCH_SIZE:-10000}
       SYNC_HOUR: ${SYNC_HOUR:-3}
       SYNC_MINUTE: ${SYNC_MINUTE:-0}
+      ENABLE_SCHEDULER: ${ENABLE_SCHEDULER:-true}
+      ENABLE_MANUAL_SYNC: ${ENABLE_MANUAL_SYNC:-true}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      API_KEY: ${API_KEY:-}
+      SYNC_API_KEY: ${SYNC_API_KEY:-}
+      BATCH_MAX_ITEMS: ${BATCH_MAX_ITEMS:-200}
+      CACHE_MAX_AGE_SECONDS: ${CACHE_MAX_AGE_SECONDS:-300}
       TZ: ${TZ:-America/Santo_Domingo}
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
 
 volumes:
   postgres_data:
-

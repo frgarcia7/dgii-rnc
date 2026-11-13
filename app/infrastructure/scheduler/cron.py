@@ -28,6 +28,7 @@ class DailySyncScheduler:
             replace_existing=True,
             max_instances=1,
             coalesce=True,
+            misfire_grace_time=3600,
         )
         self._scheduler.start()
         logger.info(

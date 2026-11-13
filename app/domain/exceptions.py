@@ -20,3 +20,5 @@ class InvalidInputError(DomainError):
 class SyncAlreadyRunningError(DomainError):
     """Se lanza cuando se intenta iniciar una sincronización habiendo otra en curso."""
 
+    def __init__(self, message: str = "Ya existe una sincronización en curso.") -> None:
+        super().__init__(message)

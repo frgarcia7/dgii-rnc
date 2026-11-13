@@ -5,7 +5,11 @@ from __future__ import annotations
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-from app.domain.exceptions import ContribuyenteNotFoundError, InvalidInputError
+from app.domain.exceptions import (
+    ContribuyenteNotFoundError,
+    InvalidInputError,
+    SyncAlreadyRunningError,
+)
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -29,3 +33,11 @@ def register_exception_handlers(app: FastAPI) -> None:
             content={"detail": str(exc)},
         )
 
+    @app.exception_handler(SyncAlreadyRunningError)
+    async def handle_sync_already_running(
+        _request: Request, exc: SyncAlreadyRunningError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": str(exc)},
+        )

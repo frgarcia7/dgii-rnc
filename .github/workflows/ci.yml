@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  quality-and-unit:
     runs-on: ubuntu-latest
 
     steps:
@@ -22,11 +22,67 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          pip install -r requirements-dev.txt
 
-      - name: Run unit tests
-        run: pytest -v
+      - name: Lint with ruff
+        run: ruff check app tests
+
+      - name: Typecheck with mypy
+        run: mypy app
+
+      - name: Run unit and API tests
+        run: pytest -v -m "not integration"
 
       - name: Validate Docker Compose configuration
         run: docker compose config -q
 
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: dgii_user
+          POSTGRES_PASSWORD: dgii_password
+          POSTGRES_DB: dgii_rnc
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dgii_user -d dgii_rnc"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.15
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.15"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run PostgreSQL 18 integration tests
+        env:
+          RUN_POSTGRES_TESTS: "true"
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_USER: dgii_user
+          DB_PASSWORD: dgii_password
+          DB_NAME: dgii_rnc
+        run: pytest -v -m integration
+
+  docker-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t dgii-rnc-api:ci .

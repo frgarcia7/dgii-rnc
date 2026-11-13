@@ -495,7 +495,7 @@ class PostgresContribuyenteRepository:
                     and len(query) >= 4
                 ):
                     fuzzy_clauses = [
-                        "immutable_unaccent(razon_social) %> immutable_unaccent(%s)",
+                        "immutable_unaccent(razon_social) %%> immutable_unaccent(%s)",
                         *filter_clauses,
                     ]
                     fuzzy_where = " AND ".join(fuzzy_clauses)

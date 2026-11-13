@@ -7,7 +7,7 @@ import logging
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import BinaryIO
+from typing import IO
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -103,7 +103,7 @@ class HttpDgiiZipSource:
                 content_hash=digest,
             )
 
-        fh: BinaryIO = local_path.open("rb")
+        fh: IO[bytes] = local_path.open("rb")
         try:
             batches = iter_source_batches(
                 fh, batch_size=batch_size, filename_hint=local_path.name

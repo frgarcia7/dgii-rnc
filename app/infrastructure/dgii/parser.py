@@ -7,7 +7,7 @@ import io
 import logging
 import unicodedata
 import zipfile
-from typing import BinaryIO, Iterable, Iterator
+from typing import IO, Iterable, Iterator
 
 from app.domain.entities import Contribuyente, normalize_rnc
 
@@ -152,7 +152,7 @@ def find_data_member(zf: zipfile.ZipFile) -> str:
     return members[0]
 
 
-def _read_encoding_sample(stream: BinaryIO) -> bytes:
+def _read_encoding_sample(stream: IO[bytes]) -> bytes:
     """Lee una muestra inicial suficiente (hasta 256 KB si empieza en ASCII puro)."""
     chunks: list[bytes] = []
     total = 0
@@ -260,7 +260,7 @@ def _yield_deduped_batches(
 
 
 def _iter_text_stream_batches(
-    raw_stream: BinaryIO,
+    raw_stream: IO[bytes],
     is_csv: bool,
     encoding: str,
     batch_size: int,
@@ -296,7 +296,7 @@ def _inspect_zip_member(
 
 
 def iter_zip_batches(
-    zip_buffer: BinaryIO, batch_size: int
+    zip_buffer: IO[bytes], batch_size: int
 ) -> Iterator[list[Contribuyente]]:
     """Lee un ZIP (en memoria o archivo temporal) y produce lotes deduplicados."""
     zip_buffer.seek(0)
@@ -322,7 +322,7 @@ def iter_zip_batches(
 
 
 def iter_source_batches(
-    source_stream: BinaryIO, batch_size: int, filename_hint: str = ""
+    source_stream: IO[bytes], batch_size: int, filename_hint: str = ""
 ) -> Iterator[list[Contribuyente]]:
     """Lee un archivo ZIP, CSV o TXT y produce lotes deduplicados por RNC."""
     source_stream.seek(0)

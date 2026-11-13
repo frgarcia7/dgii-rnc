@@ -8,6 +8,7 @@ from typing import Protocol
 from app.domain.entities import (
     CatalogStats,
     Contribuyente,
+    ContribuyenteCambio,
     DgiiFetchResult,
     SearchResult,
     SyncRun,
@@ -39,18 +40,41 @@ class ContribuyenteRepository(Protocol):
 
     def search_by_razon_social(
         self,
-        query: str,
+        query: str | None,
         limit: int,
         offset: int,
         estatus: str | None = None,
         regimen: str | None = None,
         actividad: str | None = None,
     ) -> SearchResult:
-        """Busca contribuyentes por razón social con filtros opcionales y total."""
+        """Busca contribuyentes por razón social, RNC parcial o actividad económica."""
         ...
 
-    def upsert_batch(self, items: list[Contribuyente]) -> tuple[int, int]:
+    def get_history_by_rnc(self, rnc: str, limit: int = 20) -> list[ContribuyenteCambio]:
+        """Obtiene el historial reciente de cambios registrados para un RNC/Cédula."""
+        ...
+
+    def begin_sync_tracking(self) -> None:
+        """Prepara el seguimiento temporal de RNCs vistos en la sincronización."""
+        ...
+
+    def upsert_batch(
+        self,
+        items: list[Contribuyente],
+        sync_run_id: int | None = None,
+        record_history: bool = False,
+        track_seen: bool = False,
+    ) -> tuple[int, int]:
         """Inserta o actualiza un lote y retorna (procesados, modificados)."""
+        ...
+
+    def finalize_sync_tracking(
+        self,
+        sync_run_id: int | None,
+        processed_count: int,
+        record_history: bool = False,
+    ) -> int:
+        """Marca bajas del padrón si el archivo completo es consistente y limpia staging."""
         ...
 
     def sync_lock(self) -> AbstractContextManager[bool]:

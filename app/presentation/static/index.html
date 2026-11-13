@@ -155,6 +155,7 @@
     }
     .search-row input[type="text"]:focus,
     .filters select:focus,
+    .filters input[type="text"]:focus,
     textarea:focus {
       border-color: var(--primary);
       box-shadow: 0 0 0 3px rgba(11, 79, 138, 0.14);
@@ -193,12 +194,17 @@
       font-size: 0.86rem;
       color: var(--muted);
     }
-    .filters select {
+    .filters select,
+    .filters input[type="text"] {
       padding: 6px 10px;
       border: 1px solid #cbd5e1;
       border-radius: 6px;
       background: #fff;
       font-size: 0.86rem;
+    }
+    .filters input[type="text"] {
+      min-width: 195px;
+      outline: none;
     }
 
     textarea {
@@ -315,6 +321,33 @@
       width: 100%;
       overflow-x: auto;
     }
+    .history-panel {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+      font-size: 0.84rem;
+    }
+    .history-item {
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+      margin-top: 6px;
+    }
+    .history-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      flex-wrap: wrap;
+    }
+    .history-diff {
+      margin-top: 2px;
+      line-height: 1.35;
+    }
     .alert {
       padding: 12px 14px;
       border-radius: 8px;
@@ -368,14 +401,19 @@
           <input
             type="text"
             id="queryInput"
-            placeholder="Escribe un RNC (ej. 130-66304-1), Cédula o Razón Social (ej. Banco Popular)..."
+            placeholder="RNC/Cédula (completo o parcial), Razón Social o deja vacío si filtras por actividad..."
             autocomplete="off"
-            required
           />
           <button class="btn" type="submit" id="searchBtn">Buscar</button>
         </div>
         <div class="filters">
-          <span>Filtros (búsqueda por nombre):</span>
+          <span>Filtros:</span>
+          <input
+            type="text"
+            id="actividadFilter"
+            placeholder="Actividad económica (ej. ferreteria)"
+            autocomplete="off"
+          />
           <select id="estatusFilter">
             <option value="">Estatus: Todos</option>
             <option value="ACTIVO">ACTIVO</option>
@@ -470,6 +508,9 @@
       const badges = el("div", "badge-row");
       badges.appendChild(el("span", statusBadgeClass(item.estatus), item.estatus || "N/D"));
       badges.appendChild(el("span", "badge badge-info", `${item.tipo} · ${item.regimen || "N/D"}`));
+      if (item.en_padron === false) {
+        badges.appendChild(el("span", "badge badge-bad", "Fuera del padrón vigente"));
+      }
       if (validation) {
         badges.appendChild(
           el(
@@ -481,11 +522,16 @@
       }
       left.appendChild(badges);
 
+      const historyPanel = el("div", "history-panel hidden");
+      const historyBtn = el("button", "btn btn-secondary btn-sm", "Ver historial");
+      historyBtn.type = "button";
+
       const actions = el("div", "card-actions");
       actions.appendChild(copyButton(item.rnc, `Copiar ${item.rnc}`));
       if (item.rnc_formateado && item.rnc_formateado !== item.rnc) {
         actions.appendChild(copyButton(item.rnc_formateado, `Copiar ${item.rnc_formateado}`));
       }
+      actions.appendChild(historyBtn);
 
       header.appendChild(left);
       header.appendChild(actions);
@@ -505,25 +551,120 @@
         grid.appendChild(cell);
       }
       card.appendChild(grid);
+      card.appendChild(historyPanel);
+
+      let historyLoaded = false;
+      historyBtn.addEventListener("click", async () => {
+        const isHidden = historyPanel.classList.contains("hidden");
+        if (!isHidden) {
+          historyPanel.classList.add("hidden");
+          historyBtn.textContent = "Ver historial";
+          return;
+        }
+        historyPanel.classList.remove("hidden");
+        historyBtn.textContent = "Ocultar historial";
+        if (historyLoaded) return;
+
+        historyPanel.replaceChildren(el("div", "alert alert-info", "Cargando historial..."));
+        try {
+          const hist = await apiFetch(`/rnc/${encodeURIComponent(item.rnc)}/historial?limit=20`);
+          historyLoaded = true;
+          renderHistoryPanel(historyPanel, hist);
+        } catch (err) {
+          historyPanel.replaceChildren(el("div", "alert alert-bad", err.message));
+        }
+      });
+
       return card;
     }
 
-    function looksLikeRnc(raw) {
-      const stripped = raw.replace(/[\s-]/g, "");
-      return /^\d{5,20}$/.test(stripped);
+    function changeBadgeClass(tipo) {
+      if (tipo === "ALTA" || tipo === "REINGRESO") return "badge badge-ok";
+      if (tipo === "BAJA_PADRON") return "badge badge-bad";
+      return "badge badge-warn";
+    }
+
+    function renderHistoryPanel(container, data) {
+      container.replaceChildren();
+      if (!data.cambios || !data.cambios.length) {
+        container.appendChild(
+          el(
+            "div",
+            "alert alert-info",
+            "No hay cambios históricos registrados aún para este contribuyente entre sincronizaciones."
+          )
+        );
+        return;
+      }
+
+      const list = el("div");
+      for (const ev of data.cambios) {
+        const row = el("div", "history-item");
+        const meta = el("div", "history-meta");
+        meta.appendChild(el("span", changeBadgeClass(ev.cambio_tipo), ev.cambio_tipo));
+        meta.appendChild(
+          el("span", "", ev.detected_at ? new Date(ev.detected_at).toLocaleString() : "")
+        );
+        row.appendChild(meta);
+
+        const diffs = [
+          ["Razón social", ev.razon_social_anterior, ev.razon_social_nueva],
+          ["Estatus", ev.estatus_anterior, ev.estatus_nuevo],
+          ["Régimen", ev.regimen_anterior, ev.regimen_nuevo],
+          ["Actividad", ev.actividad_anterior, ev.actividad_nueva],
+        ];
+        for (const [label, prevVal, nextVal] of diffs) {
+          if (prevVal || nextVal) {
+            const text = prevVal && nextVal
+              ? `${label}: ${prevVal} → ${nextVal}`
+              : nextVal
+                ? `${label}: ${nextVal}`
+                : `${label} previo: ${prevVal}`;
+            row.appendChild(el("div", "history-diff", text));
+          }
+        }
+        list.appendChild(row);
+      }
+      container.appendChild(list);
+    }
+
+    function extractExactRnc(raw) {
+      const cleaned = raw.replace(/^(?:RNC|CEDULA|C[ÉE]DULA)\s*[:#-]?\s*/i, "").trim();
+      if (!/^[\d\s-]+$/.test(cleaned)) return null;
+      const digits = cleaned.replace(/[\s-]/g, "");
+      return digits.length === 9 || digits.length === 11 ? digits : null;
     }
 
     async function runSingleSearch(offset = 0) {
       const output = document.getElementById("singleOutput");
       const raw = document.getElementById("queryInput").value.trim();
-      if (!raw) return;
+      const actividad = document.getElementById("actividadFilter").value.trim();
+      if (!raw && !actividad) {
+        output.replaceChildren(
+          el("div", "alert alert-warn", "Escribe un RNC, Razón Social o Actividad económica.")
+        );
+        return;
+      }
+      if (raw && raw.length < 2) {
+        output.replaceChildren(
+          el("div", "alert alert-warn", "El texto de búsqueda requiere al menos 2 caracteres.")
+        );
+        return;
+      }
+      if (!raw && actividad.length < 2) {
+        output.replaceChildren(
+          el("div", "alert alert-warn", "El filtro de actividad requiere al menos 2 caracteres.")
+        );
+        return;
+      }
 
       currentOffset = offset;
       output.replaceChildren(el("div", "alert alert-info", "Consultando..."));
 
       try {
-        if (looksLikeRnc(raw)) {
-          const data = await apiFetch(`/rnc/${encodeURIComponent(raw)}/validar`);
+        const exactRnc = raw && !actividad ? extractExactRnc(raw) : null;
+        if (exactRnc) {
+          const data = await apiFetch(`/rnc/${encodeURIComponent(exactRnc)}/validar`);
           output.replaceChildren();
           if (data.contribuyente) {
             output.appendChild(renderContribuyenteCard(data.contribuyente, data));
@@ -539,12 +680,13 @@
         }
 
         const params = new URLSearchParams({
-          query: raw,
           limit: String(PAGE_LIMIT),
           offset: String(offset),
         });
+        if (raw) params.set("query", raw);
         const estatus = document.getElementById("estatusFilter").value;
         const regimen = document.getElementById("regimenFilter").value;
+        if (actividad) params.set("actividad", actividad);
         if (estatus) params.set("estatus", estatus);
         if (regimen) params.set("regimen", regimen);
 
@@ -811,6 +953,7 @@
     document.getElementById("exportCsvBtn").addEventListener("click", exportBatchCsv);
     document.getElementById("clearBtn").addEventListener("click", () => {
       document.getElementById("queryInput").value = "";
+      document.getElementById("actividadFilter").value = "";
       document.getElementById("estatusFilter").value = "";
       document.getElementById("regimenFilter").value = "";
       document.getElementById("singleOutput").replaceChildren();

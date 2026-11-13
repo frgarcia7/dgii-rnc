@@ -8,6 +8,7 @@ from app.application.use_cases import (
     BatchLookupRncUseCase,
     CheckHealthUseCase,
     GetContribuyenteByRncUseCase,
+    GetContribuyenteHistoryUseCase,
     GetStatsUseCase,
     InitializeCatalogUseCase,
     SearchContribuyentesUseCase,
@@ -24,6 +25,10 @@ def get_settings(request: Request) -> Settings:
 
 def get_rnc_use_case(request: Request) -> GetContribuyenteByRncUseCase:
     return request.app.state.container.get_by_rnc_uc
+
+
+def get_history_use_case(request: Request) -> GetContribuyenteHistoryUseCase:
+    return request.app.state.container.history_uc
 
 
 def get_validate_use_case(request: Request) -> ValidateRncUseCase:

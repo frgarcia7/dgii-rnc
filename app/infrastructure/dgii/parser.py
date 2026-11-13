@@ -13,6 +13,9 @@ from app.domain.entities import Contribuyente, normalize_rnc
 
 logger = logging.getLogger(__name__)
 
+_ENCODING_CHUNK_BYTES = 65536
+_MAX_ENCODING_SAMPLE_BYTES = 262144
+
 HEADER_TOKENS = {"RNC", "CEDULA", "CÉDULA", "RNC/CEDULA", "CÉDULA/RNC"}
 
 _HEADER_ALIASES: dict[str, set[str]] = {
@@ -71,6 +74,11 @@ def _get_col(row: list[str], index: int | None) -> str:
     return row[index].strip()
 
 
+def _is_valid_catalog_rnc(rnc: str) -> bool:
+    """Verifica que el identificador normalizado sea numérico y de longitud válida."""
+    return rnc.isascii() and rnc.isdigit() and 5 <= len(rnc) <= 20
+
+
 def parse_csv_row(
     row: list[str], col_map: dict[str, int] | None = None
 ) -> Contribuyente | None:
@@ -89,7 +97,7 @@ def parse_csv_row(
     mapping = col_map or _DEFAULT_CSV_COLS
     raw_rnc = _get_col(row, mapping.get("rnc", 0))
     rnc = normalize_rnc(raw_rnc)[:20]
-    if not rnc or rnc.upper() in HEADER_TOKENS:
+    if not rnc or rnc.upper() in HEADER_TOKENS or not _is_valid_catalog_rnc(rnc):
         return None
 
     return Contribuyente(
@@ -115,7 +123,7 @@ def parse_pipe_line(line: str) -> Contribuyente | None:
         return None
 
     rnc = normalize_rnc(parts[0])[:20]
-    if not rnc or rnc.upper() in HEADER_TOKENS:
+    if not rnc or rnc.upper() in HEADER_TOKENS or not _is_valid_catalog_rnc(rnc):
         return None
 
     while len(parts) < 11:
@@ -144,31 +152,85 @@ def find_data_member(zf: zipfile.ZipFile) -> str:
     return members[0]
 
 
+def _read_encoding_sample(stream: BinaryIO) -> bytes:
+    """Lee una muestra inicial suficiente (hasta 256 KB si empieza en ASCII puro)."""
+    chunks: list[bytes] = []
+    total = 0
+    while total < _MAX_ENCODING_SAMPLE_BYTES:
+        chunk = stream.read(_ENCODING_CHUNK_BYTES)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if not chunk.isascii():
+            break
+    return b"".join(chunks)
+
+
 def detect_encoding_from_sample(sample: bytes) -> str:
-    """Detecta UTF-8 (con o sin BOM) o ISO-8859-1 a partir de bytes iniciales."""
+    """Detecta UTF-8 (con o sin BOM) o Windows-1252 a partir de una muestra binaria."""
     if sample.startswith(b"\xef\xbb\xbf"):
         return "utf-8-sig"
     try:
         sample.decode("utf-8")
         return "utf-8"
-    except UnicodeDecodeError:
-        return "iso-8859-1"
+    except UnicodeDecodeError as exc:
+        if exc.reason == "unexpected end of data" and exc.start >= len(sample) - 4:
+            try:
+                sample[: exc.start].decode("utf-8")
+                return "utf-8"
+            except UnicodeDecodeError:
+                pass
+        return "cp1252"
 
 
 def detect_encoding(zf: zipfile.ZipFile, member: str) -> str:
     """Detecta el encoding del archivo interno de un ZIP."""
     with zf.open(member, "r") as sample_file:
-        sample = sample_file.read(8192)
+        sample = _read_encoding_sample(sample_file)
     return detect_encoding_from_sample(sample)
 
 
-def _iter_csv_entities(text_stream: io.TextIOWrapper) -> Iterator[Contribuyente | None]:
+def detect_format_from_sample(
+    sample: bytes, encoding: str, filename_hint: str = ""
+) -> tuple[bool, str]:
+    """Detecta si la fuente es tabular CSV (y su delimitador) o TXT heredado por '|'."""
+    hint = filename_hint.lower()
+    decoded = sample.decode(encoding, errors="replace")
+    lines = [line.strip() for line in decoded.splitlines() if line.strip()][:10]
+
+    if lines:
+        first = lines[0]
+        pipe_cols = first.split("|")
+        semi_cols = first.split(";")
+        comma_cols = first.split(",")
+
+        if len(pipe_cols) >= 3:
+            if build_csv_column_map(pipe_cols) is not None:
+                return True, "|"
+            return False, "|"
+
+        if len(semi_cols) >= 3 and len(semi_cols) >= len(comma_cols):
+            return True, ";"
+        if len(comma_cols) >= 2:
+            return True, ","
+
+    if hint.endswith(".txt"):
+        return False, "|"
+    return True, ","
+
+
+def _iter_csv_entities(
+    text_stream: io.TextIOWrapper, delimiter: str = ","
+) -> Iterator[Contribuyente | None]:
     """Itera filas CSV detectando encabezados dinámicos cuando existan."""
-    reader = csv.reader(text_stream)
+    reader = csv.reader(text_stream, delimiter=delimiter)
     col_map: dict[str, int] | None = None
     first_row = True
 
     for row in reader:
+        if not row or all(not cell.strip() for cell in row):
+            continue
         if first_row:
             first_row = False
             detected = build_csv_column_map(row)
@@ -198,7 +260,11 @@ def _yield_deduped_batches(
 
 
 def _iter_text_stream_batches(
-    raw_stream: BinaryIO, is_csv: bool, encoding: str, batch_size: int
+    raw_stream: BinaryIO,
+    is_csv: bool,
+    encoding: str,
+    batch_size: int,
+    delimiter: str = ",",
 ) -> Iterator[list[Contribuyente]]:
     """Lee un stream binario de texto CSV o TXT y genera lotes deduplicados."""
     text_stream = io.TextIOWrapper(
@@ -206,7 +272,7 @@ def _iter_text_stream_batches(
     )
     try:
         entities = (
-            _iter_csv_entities(text_stream)
+            _iter_csv_entities(text_stream, delimiter=delimiter)
             if is_csv
             else (parse_pipe_line(line) for line in text_stream)
         )
@@ -216,6 +282,19 @@ def _iter_text_stream_batches(
         text_stream.detach()
 
 
+def _inspect_zip_member(
+    zf: zipfile.ZipFile, target_member: str
+) -> tuple[str, bool, str]:
+    """Detecta encoding, modo CSV/TXT y delimitador del archivo interno."""
+    with zf.open(target_member, "r") as sample_file:
+        sample = _read_encoding_sample(sample_file)
+    encoding = detect_encoding_from_sample(sample)
+    is_csv, delimiter = detect_format_from_sample(
+        sample, encoding=encoding, filename_hint=target_member
+    )
+    return encoding, is_csv, delimiter
+
+
 def iter_zip_batches(
     zip_buffer: BinaryIO, batch_size: int
 ) -> Iterator[list[Contribuyente]]:
@@ -223,18 +302,22 @@ def iter_zip_batches(
     zip_buffer.seek(0)
     with zipfile.ZipFile(zip_buffer) as zf:
         target_member = find_data_member(zf)
-        encoding = detect_encoding(zf, target_member)
-        is_csv = target_member.lower().endswith(".csv")
+        encoding, is_csv, delimiter = _inspect_zip_member(zf, target_member)
         logger.info(
-            "Procesando archivo interno: %s (formato=%s, encoding=%s)",
+            "Procesando archivo interno: %s (formato=%s, delim=%r, encoding=%s)",
             target_member,
             "CSV" if is_csv else "TXT",
+            delimiter,
             encoding,
         )
 
         with zf.open(target_member, "r") as raw_file:
             yield from _iter_text_stream_batches(
-                raw_file, is_csv=is_csv, encoding=encoding, batch_size=batch_size
+                raw_file,
+                is_csv=is_csv,
+                encoding=encoding,
+                batch_size=batch_size,
+                delimiter=delimiter,
             )
 
 
@@ -248,25 +331,25 @@ def iter_source_batches(
         return
 
     source_stream.seek(0)
-    sample = source_stream.read(8192)
+    sample = _read_encoding_sample(source_stream)
     encoding = detect_encoding_from_sample(sample)
     source_stream.seek(0)
 
-    hint = filename_hint.lower()
-    if hint.endswith(".csv"):
-        is_csv = True
-    elif hint.endswith(".txt"):
-        is_csv = False
-    else:
-        decoded_sample = sample.decode(encoding, errors="replace")
-        is_csv = "|" not in decoded_sample and "," in decoded_sample
+    is_csv, delimiter = detect_format_from_sample(
+        sample, encoding=encoding, filename_hint=filename_hint
+    )
 
     logger.info(
-        "Procesando archivo plano: %s (formato=%s, encoding=%s)",
+        "Procesando archivo plano: %s (formato=%s, delim=%r, encoding=%s)",
         filename_hint or "<stream>",
         "CSV" if is_csv else "TXT",
+        delimiter,
         encoding,
     )
     yield from _iter_text_stream_batches(
-        source_stream, is_csv=is_csv, encoding=encoding, batch_size=batch_size
+        source_stream,
+        is_csv=is_csv,
+        encoding=encoding,
+        batch_size=batch_size,
+        delimiter=delimiter,
     )

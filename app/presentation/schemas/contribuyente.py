@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.domain.entities import (
     CatalogStats,
     Contribuyente,
+    ContribuyenteCambio,
     RncValidation,
     SyncRun,
     detect_rnc_type,
@@ -34,6 +35,7 @@ class ContribuyenteResponse(BaseModel):
                 "fecha_inicio_operaciones": "01/12/2009",
                 "estatus": "SUSPENDIDO",
                 "regimen": "NORMAL",
+                "en_padron": True,
                 "updated_at": "2026-11-13T00:55:00Z",
             }
         }
@@ -56,6 +58,12 @@ class ContribuyenteResponse(BaseModel):
         ..., description="Estado en el padrón (ACTIVO, SUSPENDIDO, DADO DE BAJA, etc.)."
     )
     regimen: str = Field(..., description="Régimen de pago tributario (NORMAL, RST, etc.).")
+    en_padron: bool = Field(
+        default=True,
+        description=(
+            "Verdadero si estuvo presente en la última sincronización completa de la DGII."
+        ),
+    )
     updated_at: datetime | None = Field(
         default=None,
         description="Fecha y hora del último cambio registrado para este contribuyente.",
@@ -73,14 +81,17 @@ class ContribuyenteResponse(BaseModel):
             fecha_inicio_operaciones=entity.fecha_inicio_operaciones,
             estatus=entity.estatus,
             regimen=entity.regimen,
+            en_padron=entity.en_padron,
             updated_at=entity.updated_at,
         )
 
 
 class SearchResponse(BaseModel):
-    """Resultado paginado de la búsqueda por razón social."""
+    """Resultado paginado de la búsqueda por razón social, RNC parcial o actividad."""
 
-    query: str = Field(..., description="Texto buscado en el campo razón social.")
+    query: str | None = Field(
+        default=None, description="Texto buscado en razón social o RNC parcial (si aplica)."
+    )
     count: int = Field(..., description="Cantidad de resultados devueltos en esta página.")
     total: int = Field(..., description="Total de contribuyentes coincidentes con la búsqueda.")
     limit: int = Field(..., description="Límite máximo solicitado por página.")
@@ -92,6 +103,54 @@ class SearchResponse(BaseModel):
         default_factory=list,
         description="Lista de contribuyentes coincidentes.",
     )
+
+
+class ContribuyenteCambioResponse(BaseModel):
+    """Evento histórico detectado para un contribuyente entre sincronizaciones."""
+
+    id: int | None = None
+    sync_run_id: int | None = None
+    cambio_tipo: str = Field(
+        ...,
+        description="Tipo de cambio (`ALTA`, `ACTUALIZACION`, `BAJA_PADRON`, `REINGRESO`).",
+    )
+    razon_social_anterior: str | None = None
+    razon_social_nueva: str | None = None
+    actividad_anterior: str | None = None
+    actividad_nueva: str | None = None
+    estatus_anterior: str | None = None
+    estatus_nuevo: str | None = None
+    regimen_anterior: str | None = None
+    regimen_nuevo: str | None = None
+    detected_at: datetime | None = None
+
+    @classmethod
+    def from_domain(cls, entity: ContribuyenteCambio) -> ContribuyenteCambioResponse:
+        return cls(
+            id=entity.id,
+            sync_run_id=entity.sync_run_id,
+            cambio_tipo=entity.cambio_tipo,
+            razon_social_anterior=entity.razon_social_anterior,
+            razon_social_nueva=entity.razon_social_nueva,
+            actividad_anterior=entity.actividad_anterior,
+            actividad_nueva=entity.actividad_nueva,
+            estatus_anterior=entity.estatus_anterior,
+            estatus_nuevo=entity.estatus_nuevo,
+            regimen_anterior=entity.regimen_anterior,
+            regimen_nuevo=entity.regimen_nuevo,
+            detected_at=entity.detected_at,
+        )
+
+
+class ContribuyenteHistoryResponse(BaseModel):
+    """Ficha actual (si existe) e historial reciente de cambios de un RNC/Cédula."""
+
+    rnc: str
+    rnc_formateado: str
+    en_padron: bool
+    contribuyente: ContribuyenteResponse | None = None
+    total_cambios: int
+    cambios: list[ContribuyenteCambioResponse] = Field(default_factory=list)
 
 
 class RncValidationResponse(BaseModel):

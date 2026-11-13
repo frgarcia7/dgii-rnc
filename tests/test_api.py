@@ -13,6 +13,7 @@ from app.application.use_cases import (
     BatchLookupRncUseCase,
     CheckHealthUseCase,
     GetContribuyenteByRncUseCase,
+    GetContribuyenteHistoryUseCase,
     GetStatsUseCase,
     InitializeCatalogUseCase,
     SearchContribuyentesUseCase,
@@ -151,6 +152,7 @@ def _build_test_app(
         scheduler=None,
         init_uc=InitializeCatalogUseCase(repo, sync_uc),
         get_by_rnc_uc=GetContribuyenteByRncUseCase(repo, lookup_cache=lookup_cache),
+        history_uc=GetContribuyenteHistoryUseCase(repo),
         validate_rnc_uc=ValidateRncUseCase(repo, lookup_cache=lookup_cache),
         batch_lookup_uc=BatchLookupRncUseCase(
             repo, max_items=resolved_api.batch_max_items
@@ -471,3 +473,80 @@ class TestApiEndpoints(unittest.TestCase):
         self.assertEqual(crash_resp.status_code, 500)
         self.assertEqual(crash_resp.json()["detail"], "Error interno del servidor.")
         self.assertNotIn("sensitive", crash_resp.text)
+
+    def test_search_by_actividad_only_partial_rnc_and_history_endpoint(self) -> None:
+        # Búsqueda solo por actividad económica (sin query)
+        act_only = call_asgi(
+            self.app,
+            "GET",
+            "/api/v1/buscar",
+            query={"actividad": "electricas"},
+        )
+        self.assertEqual(act_only.status_code, 200)
+        act_body = act_only.json()
+        self.assertIsNone(act_body["query"])
+        self.assertEqual(act_body["total"], 1)
+        self.assertEqual(act_body["results"][0]["rnc"], "130663041")
+        self.assertTrue(act_body["results"][0]["en_padron"])
+
+        # Sin query ni actividad -> 400; query solo espacios -> 400
+        self.assertEqual(call_asgi(self.app, "GET", "/api/v1/buscar").status_code, 400)
+        self.assertEqual(
+            call_asgi(self.app, "GET", "/api/v1/buscar", query={"query": "  "}).status_code,
+            400,
+        )
+
+        # Prefijo numérico de RNC en /buscar
+        prefix_rnc = call_asgi(
+            self.app, "GET", "/api/v1/buscar", query={"query": "13066"}
+        )
+        self.assertEqual(prefix_rnc.status_code, 200)
+        self.assertEqual(prefix_rnc.json()["results"][0]["rnc"], "130663041")
+
+        # Historial tras actualización + baja en sync posterior
+        self.repo.begin_sync_tracking()
+        self.repo.upsert_batch(
+            [
+                Contribuyente(
+                    rnc="130663041",
+                    razon_social=self.sample.razon_social,
+                    actividad_economica=self.sample.actividad_economica,
+                    fecha_inicio_operaciones=self.sample.fecha_inicio_operaciones,
+                    estatus="SUSPENDIDO",
+                    regimen="NORMAL",
+                )
+            ],
+            sync_run_id=1,
+            record_history=True,
+            track_seen=True,
+        )
+        self.repo.finalize_sync_tracking(
+            sync_run_id=1, processed_count=1, record_history=True
+        )
+
+        hist_ok = call_asgi(self.app, "GET", "/api/v1/rnc/130-66304-1/historial")
+        self.assertEqual(hist_ok.status_code, 200)
+        hist_json = hist_ok.json()
+        self.assertTrue(hist_json["en_padron"])
+        self.assertEqual(hist_json["total_cambios"], 1)
+        self.assertEqual(hist_json["cambios"][0]["cambio_tipo"], "ACTUALIZACION")
+        self.assertEqual(hist_json["cambios"][0]["estatus_nuevo"], "SUSPENDIDO")
+
+        hist_baja = call_asgi(self.app, "GET", "/api/v1/rnc/101010101/historial")
+        self.assertEqual(hist_baja.status_code, 200)
+        self.assertFalse(hist_baja.json()["en_padron"])
+        self.assertEqual(hist_baja.json()["cambios"][0]["cambio_tipo"], "BAJA_PADRON")
+
+        self.assertEqual(
+            call_asgi(self.app, "GET", "/api/v1/rnc/999999999/historial").status_code,
+            404,
+        )
+        self.assertEqual(
+            call_asgi(self.app, "GET", "/api/v1/rnc/abc/historial").status_code,
+            400,
+        )
+
+        # UI incluye filtro actividad y botón de historial
+        home = call_asgi(self.app, "GET", "/")
+        self.assertIn("actividadFilter", home.text)
+        self.assertIn("Ver historial", home.text)

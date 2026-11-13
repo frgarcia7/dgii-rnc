@@ -185,3 +185,48 @@ class TestDgiiParser(unittest.TestCase):
                 items = list(res.batches)[0]
                 self.assertEqual(items[0].rnc, "130663041")
                 self.assertEqual(items[0].razon_social, "STREAM SRL")
+
+    def test_parser_handles_semicolons_pipes_cp1252_and_skips_footers(self) -> None:
+        # CSV delimitado por ';' con líneas en blanco iniciales y pie de página no numérico
+        semi_csv = (
+            "\n\n"
+            "RNC;RAZÓN SOCIAL;ACTIVIDAD ECONÓMICA;FECHA DE INICIO OPERACIONES;ESTADO;RÉGIMEN\n"
+            '"130663041";"FERRETERÍA, S.R.L.";"VENTA; MATERIALES";"01/01/2015";"ACTIVO";"NORMAL"\n'
+            '"TOTAL REGISTROS";"1";"";"";"";""\n'
+        ).encode("utf-8")
+        semi_zip = io.BytesIO(_build_zip_bytes("datos.csv", semi_csv))
+        semi_items = [item for batch in iter_zip_batches(semi_zip, batch_size=10) for item in batch]
+        self.assertEqual(len(semi_items), 1)
+        self.assertEqual(semi_items[0].razon_social, "FERRETERÍA, S.R.L.")
+        self.assertEqual(semi_items[0].actividad_economica, "VENTA; MATERIALES")
+
+        # Archivo TXT legado con '|' incluso si viene empaquetado sin extensión clara
+        pipe_bytes = (
+            "101010101|CLINICA DENTAL SRL|COMERCIAL|SALUD|||||05/05/2019|ACTIVO|RST\n"
+            "PIE|IGNORAR\n"
+        ).encode("utf-8")
+        pipe_items = [
+            item
+            for batch in iter_source_batches(io.BytesIO(pipe_bytes), batch_size=10)
+            for item in batch
+        ]
+        self.assertEqual(len(pipe_items), 1)
+        self.assertEqual(pipe_items[0].rnc, "101010101")
+
+        # cp1252 con caracteres especiales (€ / comillas tipográficas) tras >10 KB de ASCII puro
+        ascii_prefix = "130663041,EMPRESA ASCII,SERVICIOS,01/01/2020,ACTIVO,NORMAL\n" * 180
+        cp1252_tail = '101010101,"IMPORTADORA €URO",COMERCIO,01/02/2021,ACTIVO,NORMAL\n'.encode(
+            "cp1252"
+        )
+        cp_stream = io.BytesIO(
+            "RNC,RAZON SOCIAL,ACTIVIDAD,FECHA,ESTADO,REGIMEN\n".encode("ascii")
+            + ascii_prefix.encode("ascii")
+            + cp1252_tail
+        )
+        cp_items = [
+            item
+            for batch in iter_source_batches(cp_stream, batch_size=500, filename_hint="rnc.csv")
+            for item in batch
+        ]
+        by_rnc = {item.rnc: item for item in cp_items}
+        self.assertEqual(by_rnc["101010101"].razon_social, "IMPORTADORA €URO")

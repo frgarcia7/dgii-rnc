@@ -9,13 +9,16 @@ from fastapi import APIRouter, Depends, Path, Query, Response, status
 from app.application.use_cases import (
     BatchLookupRncUseCase,
     GetContribuyenteByRncUseCase,
+    GetContribuyenteHistoryUseCase,
     GetStatsUseCase,
     SearchContribuyentesUseCase,
     ValidateRncUseCase,
 )
 from app.core.config import Settings
+from app.domain.entities import format_rnc
 from app.presentation.dependencies import (
     get_batch_use_case,
+    get_history_use_case,
     get_rnc_use_case,
     get_search_use_case,
     get_settings,
@@ -28,6 +31,8 @@ from app.presentation.dependencies import (
 from app.presentation.schemas.contribuyente import (
     BatchLookupRequest,
     BatchLookupResponse,
+    ContribuyenteCambioResponse,
+    ContribuyenteHistoryResponse,
     ContribuyenteResponse,
     ErrorResponse,
     RncValidationResponse,
@@ -127,6 +132,62 @@ def batch_lookup(
 
 
 @router.get(
+    "/rnc/{rnc}/historial",
+    response_model=ContribuyenteHistoryResponse,
+    summary="Consultar historial de cambios de un RNC o Cédula",
+    description=(
+        "Retorna el estado actual del contribuyente (incluyendo si sigue en el padrón vigente) "
+        "y los últimos cambios detectados entre sincronizaciones (`ALTA`, `ACTUALIZACION`, "
+        "`BAJA_PADRON`, `REINGRESO`)."
+    ),
+    dependencies=[Depends(rate_limit_lookup)],
+    responses={
+        status.HTTP_400_BAD_REQUEST: {
+            "model": ErrorResponse,
+            "description": "RNC inválido o vacío.",
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "model": ErrorResponse,
+            "description": "Sin registros ni historial para ese RNC/Cédula.",
+        },
+        **_COMMON_RATE_AND_DB_RESPONSES,
+    },
+)
+def get_rnc_history(
+    response: Response,
+    rnc: str = Path(
+        ...,
+        description="Número de RNC (9 dígitos) o Cédula (11 dígitos), con o sin guiones.",
+        examples=["130-66304-1"],
+    ),
+    limit: int = Query(
+        20,
+        ge=1,
+        le=100,
+        description="Cantidad máxima de eventos históricos recientes a retornar.",
+    ),
+    use_case: GetContribuyenteHistoryUseCase = Depends(get_history_use_case),
+    settings: Settings = Depends(get_settings),
+) -> ContribuyenteHistoryResponse:
+    contribuyente, history = use_case.execute(rnc, limit=limit)
+    resolved_rnc = contribuyente.rnc if contribuyente is not None else history[0].rnc
+    en_padron = contribuyente.en_padron if contribuyente is not None else False
+    _apply_cache_headers(response, settings)
+    return ContribuyenteHistoryResponse(
+        rnc=resolved_rnc,
+        rnc_formateado=format_rnc(resolved_rnc),
+        en_padron=en_padron,
+        contribuyente=(
+            ContribuyenteResponse.from_domain(contribuyente)
+            if contribuyente is not None
+            else None
+        ),
+        total_cambios=len(history),
+        cambios=[ContribuyenteCambioResponse.from_domain(item) for item in history],
+    )
+
+
+@router.get(
     "/rnc/{rnc}",
     response_model=ContribuyenteResponse,
     summary="Consultar contribuyente por RNC o Cédula",
@@ -165,17 +226,18 @@ def get_by_rnc(
 @router.get(
     "/buscar",
     response_model=SearchResponse,
-    summary="Buscar contribuyentes por razón social",
+    summary="Buscar contribuyentes por razón social, RNC parcial o actividad",
     description=(
-        "Búsqueda parcial insensible a mayúsculas y tildes (`unaccent` + `pg_trgm`) "
-        "sobre `razon_social`, ordenada por relevancia y con filtros opcionales."
+        "Búsqueda tolerante a mayúsculas, tildes, múltiples palabras, errores tipográficos "
+        "leves (`unaccent` + FTS español + `pg_trgm`) y prefijos numéricos de RNC. Permite "
+        "consultar solo por `actividad` cuando no se especifica `query`."
     ),
     dependencies=[Depends(rate_limit_search)],
     responses={
         status.HTTP_400_BAD_REQUEST: {
             "model": ErrorResponse,
             "description": (
-                "El parámetro `query` tiene menos de 2 caracteres tras limpiar espacios."
+                "Debe indicar `query` o `actividad` con al menos 2 caracteres útiles."
             ),
         },
         status.HTTP_504_GATEWAY_TIMEOUT: {
@@ -186,11 +248,11 @@ def get_by_rnc(
     },
 )
 def search_by_name(
-    query: str = Query(
-        ...,
+    query: str | None = Query(
+        default=None,
         min_length=2,
         description=(
-            "Texto parcial o completo a buscar dentro de la razón social (mínimo 2 caracteres)."
+            "Razón social o prefijo numérico de RNC/Cédula (opcional si envía `actividad`)."
         ),
         examples=["BANCO POPULAR"],
     ),
@@ -222,9 +284,9 @@ def search_by_name(
     ),
     use_case: SearchContribuyentesUseCase = Depends(get_search_use_case),
 ) -> SearchResponse:
-    cleaned_query = " ".join(query.split())
+    cleaned_query = " ".join(query.split()) if query is not None else None
     search_result = use_case.execute(
-        raw_query=cleaned_query,
+        raw_query=query,
         limit=limit,
         offset=offset,
         estatus=estatus,

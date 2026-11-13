@@ -40,7 +40,10 @@ class TestPostgresIntegration(unittest.TestCase):
     def setUp(self) -> None:
         with self.conn_manager.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("TRUNCATE TABLE contribuyentes, sync_runs RESTART IDENTITY;")
+                cur.execute(
+                    "TRUNCATE TABLE contribuyente_historial, sync_seen_rncs, "
+                    "contribuyentes, sync_runs RESTART IDENTITY CASCADE;"
+                )
 
     def test_upsert_distinct_search_unaccent_and_advisory_lock(self) -> None:
         c1 = Contribuyente(
@@ -113,4 +116,91 @@ class TestPostgresIntegration(unittest.TestCase):
         stats = self.repo.get_stats(is_syncing=False)
         self.assertEqual(stats.total_contribuyentes, 2)
         self.assertIsNotNone(stats.last_sync)
+
+    def test_fts_fuzzy_numeric_prefix_and_sync_history(self) -> None:
+        ferr = Contribuyente(
+            rnc="131999888",
+            razon_social="FERRETERÍA HERMANOS OCHOA SRL",
+            actividad_economica="VENTA DE MATERIALES ELÉCTRICOS",
+            fecha_inicio_operaciones="01/03/2015",
+            estatus="ACTIVO",
+            regimen="NORMAL",
+        )
+        clinica = Contribuyente(
+            rnc="130663041",
+            razon_social="CLÍNICA DEL CORAZÓN SRL",
+            actividad_economica="SALUD",
+            fecha_inicio_operaciones="01/12/2009",
+            estatus="ACTIVO",
+            regimen="NORMAL",
+        )
+
+        self.repo.begin_sync_tracking()
+        self.repo.upsert_batch([ferr, clinica], track_seen=True, record_history=False)
+        self.repo.finalize_sync_tracking(sync_run_id=None, processed_count=2, record_history=False)
+
+        # Multi-palabra FTS español (plural + palabras no contiguas)
+        multi = self.repo.search_by_razon_social("ferreterias ochoa", limit=10, offset=0)
+        self.assertEqual(multi.total, 1)
+        self.assertEqual(multi.items[0].rnc, "131999888")
+
+        # Fallback fuzzy word_similarity con error tipográfico
+        fuzzy = self.repo.search_by_razon_social("clinica corason", limit=10, offset=0)
+        self.assertEqual(fuzzy.total, 1)
+        self.assertEqual(fuzzy.items[0].rnc, "130663041")
+
+        # Prefijo numérico RNC y búsqueda solo por actividad
+        rnc_pref = self.repo.search_by_razon_social("13199", limit=10, offset=0)
+        self.assertEqual(rnc_pref.items[0].rnc, "131999888")
+
+        act_only = self.repo.search_by_razon_social(
+            None, limit=10, offset=0, actividad="materiales electricos"
+        )
+        self.assertEqual(act_only.total, 1)
+        self.assertEqual(act_only.items[0].rnc, "131999888")
+
+        # Ciclo de cambios entre syncs: ACTUALIZACION + BAJA_PADRON + REINGRESO
+        run_2 = self.repo.record_sync_start("dgii")
+        self.repo.begin_sync_tracking()
+        ferr_updated = Contribuyente(
+            rnc=ferr.rnc,
+            razon_social=ferr.razon_social,
+            actividad_economica=ferr.actividad_economica,
+            fecha_inicio_operaciones=ferr.fecha_inicio_operaciones,
+            estatus="SUSPENDIDO",
+            regimen=ferr.regimen,
+        )
+        self.repo.upsert_batch(
+            [ferr_updated], sync_run_id=run_2, record_history=True, track_seen=True
+        )
+        bajas = self.repo.finalize_sync_tracking(
+            sync_run_id=run_2, processed_count=1, record_history=True
+        )
+        self.assertEqual(bajas, 1)
+
+        ferr_hist = self.repo.get_history_by_rnc("131999888")
+        self.assertEqual(len(ferr_hist), 1)
+        self.assertEqual(ferr_hist[0].cambio_tipo, "ACTUALIZACION")
+        self.assertEqual(ferr_hist[0].estatus_nuevo, "SUSPENDIDO")
+
+        dropped = self.repo.get_by_rnc("130663041")
+        assert dropped is not None
+        self.assertFalse(dropped.en_padron)
+        clinica_hist = self.repo.get_history_by_rnc("130663041")
+        self.assertEqual(clinica_hist[0].cambio_tipo, "BAJA_PADRON")
+
+        # Reingreso
+        run_3 = self.repo.record_sync_start("dgii")
+        self.repo.begin_sync_tracking()
+        self.repo.upsert_batch(
+            [ferr_updated, clinica], sync_run_id=run_3, record_history=True, track_seen=True
+        )
+        self.repo.finalize_sync_tracking(
+            sync_run_id=run_3, processed_count=2, record_history=True
+        )
+        clinica_reentered = self.repo.get_by_rnc("130663041")
+        assert clinica_reentered is not None
+        self.assertTrue(clinica_reentered.en_padron)
+        clinica_hist_2 = self.repo.get_history_by_rnc("130663041")
+        self.assertEqual(clinica_hist_2[0].cambio_tipo, "REINGRESO")
 

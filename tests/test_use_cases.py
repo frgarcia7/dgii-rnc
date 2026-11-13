@@ -15,6 +15,7 @@ from app.application.use_cases import (
     BatchLookupRncUseCase,
     CheckHealthUseCase,
     GetContribuyenteByRncUseCase,
+    GetContribuyenteHistoryUseCase,
     GetStatsUseCase,
     InitializeCatalogUseCase,
     SearchContribuyentesUseCase,
@@ -335,6 +336,141 @@ class TestUseCases(unittest.TestCase):
         assert latest_after_empty is not None
         self.assertEqual(latest_after_empty.status, "failed")
         self.assertIsNone(repo.get_last_successful_sync())
+
+    def test_search_supports_actividad_only_multitoken_fuzzy_and_rnc_prefix(self) -> None:
+        ferreteria = Contribuyente(
+            rnc="131999888",
+            razon_social="FERRETERÍA HERMANOS OCHOA SRL",
+            actividad_economica="VENTA DE MATERIALES DE CONSTRUCCIÓN",
+            fecha_inicio_operaciones="01/03/2015",
+            estatus="ACTIVO",
+            regimen="NORMAL",
+        )
+        clinica = Contribuyente(
+            rnc="132000111",
+            razon_social="CLÍNICA DEL CORAZÓN SRL",
+            actividad_economica="SERVICIOS MÉDICOS",
+            fecha_inicio_operaciones="10/06/2016",
+            estatus="ACTIVO",
+            regimen="NORMAL",
+        )
+        repo = InMemoryRepo([self.sample, self.second, ferreteria, clinica])
+        search_uc = SearchContribuyentesUseCase(repo)
+
+        # Solo por actividad económica sin query
+        by_act = search_uc.execute(raw_query=None, actividad="materiales construccion")
+        self.assertEqual(by_act.total, 1)
+        self.assertEqual(by_act.items[0].rnc, "131999888")
+
+        # Multi-palabra fuera de secuencia exacta
+        multi = search_uc.execute(raw_query="ferreteria ochoa")
+        self.assertEqual(multi.total, 1)
+        self.assertEqual(multi.items[0].rnc, "131999888")
+
+        # Prefijo numérico de RNC
+        rnc_pref = search_uc.execute(raw_query="13199")
+        self.assertEqual(rnc_pref.total, 1)
+        self.assertEqual(rnc_pref.items[0].rnc, "131999888")
+
+        # Tolerancia tipográfica en fallback difuso
+        fuzzy = search_uc.execute(raw_query="clinica del corason")
+        self.assertEqual(fuzzy.total, 1)
+        self.assertEqual(fuzzy.items[0].rnc, "132000111")
+
+        # Sin query ni actividad o query de solo espacios -> InvalidInputError
+        with self.assertRaises(InvalidInputError):
+            search_uc.execute(raw_query=None, actividad=None)
+        with self.assertRaises(InvalidInputError):
+            search_uc.execute(raw_query="   ", actividad="construccion")
+
+    def test_sync_history_lifecycle_and_partial_baja_guard(self) -> None:
+        repo = InMemoryRepo()
+        first_batch = [self.sample, self.second]
+        sync_1 = SyncRncCatalogUseCase(
+            repo, InMemorySource([first_batch], etag='"v1"', content_hash="h1")
+        )
+        sync_1.execute()
+
+        # Carga inicial en BD vacía no genera miles/cientos de filas ALTA innecesarias
+        hist_uc = GetContribuyenteHistoryUseCase(repo)
+        current, events_1 = hist_uc.execute("130663041")
+        self.assertIsNotNone(current)
+        self.assertTrue(current.en_padron if current else False)
+        self.assertEqual(events_1, [])
+
+        # Segundo sync: sample cambia estatus, second sale (BAJA_PADRON), third entra (ALTA)
+        updated_sample = Contribuyente(
+            rnc=self.sample.rnc,
+            razon_social=self.sample.razon_social,
+            actividad_economica=self.sample.actividad_economica,
+            fecha_inicio_operaciones=self.sample.fecha_inicio_operaciones,
+            estatus="ACTIVO",
+            regimen=self.sample.regimen,
+        )
+        third = Contribuyente(
+            rnc="102030405",
+            razon_social="NUEVA EMPRESA SRL",
+            actividad_economica="SERVICIOS",
+            fecha_inicio_operaciones="01/01/2025",
+            estatus="ACTIVO",
+            regimen="NORMAL",
+        )
+        sync_2 = SyncRncCatalogUseCase(
+            repo,
+            InMemorySource([[updated_sample, third]], etag='"v2"', content_hash="h2"),
+        )
+        report_2 = sync_2.execute()
+        self.assertEqual(report_2.status, "completed")
+        self.assertEqual(report_2.changed, 3)
+
+        _, sample_hist = hist_uc.execute("130663041")
+        self.assertEqual(len(sample_hist), 1)
+        self.assertEqual(sample_hist[0].cambio_tipo, "ACTUALIZACION")
+        self.assertEqual(sample_hist[0].estatus_anterior, "SUSPENDIDO")
+        self.assertEqual(sample_hist[0].estatus_nuevo, "ACTIVO")
+
+        dropped, dropped_hist = hist_uc.execute("101010101")
+        self.assertIsNotNone(dropped)
+        assert dropped is not None
+        self.assertFalse(dropped.en_padron)
+        self.assertEqual(dropped_hist[0].cambio_tipo, "BAJA_PADRON")
+
+        # Tercer sync: second reingresa
+        sync_3 = SyncRncCatalogUseCase(
+            repo,
+            InMemorySource(
+                [[updated_sample, self.second, third]], etag='"v3"', content_hash="h3"
+            ),
+        )
+        sync_3.execute()
+        reentered, re_hist = hist_uc.execute("101010101")
+        assert reentered is not None
+        self.assertTrue(reentered.en_padron)
+        self.assertEqual(re_hist[0].cambio_tipo, "REINGRESO")
+
+        with self.assertRaises(ContribuyenteNotFoundError):
+            hist_uc.execute("999999999")
+        with self.assertRaises(InvalidInputError):
+            hist_uc.execute("abc")
+
+        # Guardia parcial: si hay >1000 activos y llega un lote <50%, no marca bajas
+        bulk = [
+            Contribuyente(
+                rnc=str(200000000 + i),
+                razon_social=f"EMPRESA {i}",
+                actividad_economica="SERVICIOS",
+                fecha_inicio_operaciones="01/01/2020",
+                estatus="ACTIVO",
+                regimen="NORMAL",
+            )
+            for i in range(1050)
+        ]
+        bulk_repo = InMemoryRepo(bulk)
+        partial_sync = SyncRncCatalogUseCase(
+            bulk_repo, InMemorySource([bulk[:5]], etag='"partial"', content_hash="hp")
+        )
+        partial_sync.execute(force=True)
+        self.assertTrue(bulk_repo.data[bulk[-1].rnc].en_padron)
 
 
 class TestConnectionPoolResilience(unittest.TestCase):

@@ -13,6 +13,7 @@ from app.domain.entities import (
     BatchLookupResult,
     CatalogStats,
     Contribuyente,
+    ContribuyenteCambio,
     RncValidation,
     SearchResult,
     SyncReport,
@@ -68,6 +69,30 @@ class GetContribuyenteByRncUseCase:
             raise ContribuyenteNotFoundError(normalized)
 
         return contribuyente
+
+
+class GetContribuyenteHistoryUseCase:
+    """Caso de uso para consultar el historial de cambios de un RNC o Cédula."""
+
+    def __init__(self, repository: ContribuyenteRepository) -> None:
+        self._repository = repository
+
+    def execute(
+        self, raw_rnc: str, limit: int = 20
+    ) -> tuple[Contribuyente | None, list[ContribuyenteCambio]]:
+        normalized = normalize_rnc(raw_rnc)
+        if not _is_valid_lookup_rnc(normalized):
+            raise InvalidInputError(
+                "El RNC o Cédula debe contener únicamente entre 5 y 20 dígitos."
+            )
+
+        safe_limit = max(1, min(limit, 100))
+        contribuyente = self._repository.get_by_rnc(normalized)
+        history = self._repository.get_history_by_rnc(normalized, limit=safe_limit)
+        if contribuyente is None and not history:
+            raise ContribuyenteNotFoundError(normalized)
+
+        return contribuyente, history
 
 
 class ValidateRncUseCase:
@@ -140,31 +165,37 @@ class BatchLookupRncUseCase:
 
 
 class SearchContribuyentesUseCase:
-    """Caso de uso para buscar contribuyentes por coincidencia parcial en razón social."""
+    """Caso de uso para buscar contribuyentes por razón social, RNC o actividad."""
 
     def __init__(self, repository: ContribuyenteRepository) -> None:
         self._repository = repository
 
     def execute(
         self,
-        raw_query: str,
+        raw_query: str | None = None,
         limit: int = 50,
         offset: int = 0,
         estatus: str | None = None,
         regimen: str | None = None,
         actividad: str | None = None,
     ) -> SearchResult:
-        cleaned = " ".join(raw_query.split())
-        if len(cleaned) < 2:
-            raise InvalidInputError(
-                "El parámetro 'query' debe tener al menos 2 caracteres."
-            )
-
         clean_estatus = estatus.strip().upper() if estatus and estatus.strip() else None
         clean_regimen = regimen.strip().upper() if regimen and regimen.strip() else None
         clean_actividad = (
             " ".join(actividad.split()) if actividad and actividad.strip() else None
         )
+
+        cleaned: str | None = None
+        if raw_query is not None:
+            cleaned = " ".join(raw_query.split())
+            if len(cleaned) < 2:
+                raise InvalidInputError(
+                    "El parámetro 'query' debe tener al menos 2 caracteres."
+                )
+        elif not clean_actividad or len(clean_actividad) < 2:
+            raise InvalidInputError(
+                "Debe proporcionar 'query' o 'actividad' (mínimo 2 caracteres)."
+            )
 
         return self._repository.search_by_razon_social(
             query=cleaned,
@@ -272,8 +303,16 @@ class SyncRncCatalogUseCase:
                         message="El padrón ya estaba actualizado (sin cambios en la fuente).",
                     )
 
+                had_previous_data = self._repository.has_records()
+                self._repository.begin_sync_tracking()
+
                 for batch in fetch_result.batches:
-                    processed, changed = self._repository.upsert_batch(batch)
+                    processed, changed = self._repository.upsert_batch(
+                        batch,
+                        sync_run_id=run_id,
+                        record_history=had_previous_data,
+                        track_seen=True,
+                    )
                     total_processed += processed
                     total_changed += changed
                     if total_processed > 0 and total_processed % 100_000 == 0:
@@ -288,6 +327,13 @@ class SyncRncCatalogUseCase:
                         "El archivo descargado de la DGII no contiene registros válidos; "
                         "se abortó para proteger el catálogo actual."
                     )
+
+                bajas = self._repository.finalize_sync_tracking(
+                    sync_run_id=run_id,
+                    processed_count=total_processed,
+                    record_history=had_previous_data,
+                )
+                total_changed += bajas
 
                 if total_changed > 0:
                     try:

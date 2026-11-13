@@ -5,12 +5,15 @@ from __future__ import annotations
 import threading
 import unicodedata
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Iterator
 
 from app.domain.entities import (
     CatalogStats,
     Contribuyente,
+    ContribuyenteCambio,
     DgiiFetchResult,
     SearchResult,
     SyncRun,
@@ -22,6 +25,24 @@ def _strip_accents(value: str) -> str:
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).upper()
 
 
+def _word_similarity(query: str, target: str) -> float:
+    """Similitud aproximada por palabra/frase equivalente a pg_trgm word_similarity."""
+    q = _strip_accents(query)
+    t = _strip_accents(target)
+    if not q or not t:
+        return 0.0
+    if q in t:
+        return 1.0
+    words = t.split()
+    q_words = q.split()
+    best = SequenceMatcher(None, q, t).ratio()
+    window = max(1, len(q_words))
+    for i in range(max(1, len(words) - window + 1)):
+        chunk = " ".join(words[i : i + window])
+        best = max(best, SequenceMatcher(None, q, chunk).ratio())
+    return best
+
+
 class InMemoryRepo:
     """Repositorio en memoria para pruebas aisladas sin PostgreSQL."""
 
@@ -31,7 +52,10 @@ class InMemoryRepo:
         self.lock_busy = False
         self._lock = threading.Lock()
         self._runs: list[SyncRun] = []
+        self._history: list[ContribuyenteCambio] = []
+        self._seen_rncs: set[str] = set()
         self._next_run_id = 1
+        self._next_history_id = 1
         self.count_calls = 0
         self.stats_calls = 0
         self.get_by_rnc_calls = 0
@@ -68,9 +92,27 @@ class InMemoryRepo:
         self._maybe_fail()
         return [self.data[rnc] for rnc in rncs if rnc in self.data]
 
+    def _matches_filters(
+        self,
+        item: Contribuyente,
+        estatus: str | None,
+        regimen: str | None,
+        actividad: str | None,
+    ) -> bool:
+        if estatus and item.estatus.upper() != estatus.upper():
+            return False
+        if regimen and item.regimen.upper() != regimen.upper():
+            return False
+        if actividad:
+            act_norm = _strip_accents(item.actividad_economica)
+            act_tokens = [tok for tok in _strip_accents(actividad).split() if tok]
+            if not all(tok in act_norm for tok in act_tokens):
+                return False
+        return True
+
     def search_by_razon_social(
         self,
-        query: str,
+        query: str | None,
         limit: int,
         offset: int,
         estatus: str | None = None,
@@ -78,49 +120,255 @@ class InMemoryRepo:
         actividad: str | None = None,
     ) -> SearchResult:
         self._maybe_fail()
-        q = _strip_accents(query)
-        act_q = _strip_accents(actividad) if actividad else None
+        filtered = [
+            item
+            for item in self.data.values()
+            if self._matches_filters(item, estatus, regimen, actividad)
+        ]
 
-        matches = []
-        for item in self.data.values():
-            if q not in _strip_accents(item.razon_social):
-                continue
-            if estatus and item.estatus.upper() != estatus.upper():
-                continue
-            if regimen and item.regimen.upper() != regimen.upper():
-                continue
-            if act_q and act_q not in _strip_accents(item.actividad_economica):
-                continue
-            matches.append(item)
+        if query is None:
+            filtered.sort(key=lambda item: item.razon_social)
+            return SearchResult(
+                items=filtered[offset : offset + limit], total=len(filtered)
+            )
+
+        compact_digits = query.replace("-", "").replace(" ", "")
+        is_numeric = compact_digits.isascii() and compact_digits.isdigit()
+        q = _strip_accents(query)
+
+        if is_numeric:
+            matches = [
+                item
+                for item in filtered
+                if item.rnc.startswith(compact_digits)
+                or (len(compact_digits) >= 3 and q in _strip_accents(item.razon_social))
+            ]
+            matches.sort(
+                key=lambda item: (
+                    (
+                        0
+                        if item.rnc == compact_digits
+                        else 1
+                        if item.rnc.startswith(compact_digits)
+                        else 2
+                    ),
+                    item.razon_social,
+                )
+            )
+            return SearchResult(items=matches[offset : offset + limit], total=len(matches))
+
+        tokens = [tok for tok in q.split() if tok]
+        if len(query) < 3:
+            matches = [
+                item for item in filtered if _strip_accents(item.razon_social).startswith(q)
+            ]
+        elif len(tokens) > 1 and any(len(tok) >= 3 for tok in tokens):
+            matches = [
+                item
+                for item in filtered
+                if all(tok in _strip_accents(item.razon_social) for tok in tokens)
+            ]
+        else:
+            matches = [item for item in filtered if q in _strip_accents(item.razon_social)]
+
+        if not matches and offset == 0 and len(query) >= 4:
+            scored = [
+                (_word_similarity(query, item.razon_social), item) for item in filtered
+            ]
+            fuzzy = [pair for pair in scored if pair[0] >= 0.65]
+            fuzzy.sort(key=lambda pair: (-pair[0], pair[1].razon_social))
+            matches = [item for _, item in fuzzy]
+            return SearchResult(items=matches[:limit], total=len(matches))
 
         matches.sort(
             key=lambda item: (
-                0 if _strip_accents(item.razon_social).startswith(q) else 1,
+                0
+                if _strip_accents(item.razon_social).startswith(q)
+                else 1
+                if q in _strip_accents(item.razon_social)
+                else 2,
                 item.razon_social,
             )
         )
         return SearchResult(items=matches[offset : offset + limit], total=len(matches))
 
-    def upsert_batch(self, items: list[Contribuyente]) -> tuple[int, int]:
+    def get_history_by_rnc(self, rnc: str, limit: int = 20) -> list[ContribuyenteCambio]:
+        self._maybe_fail()
+        matches = [ev for ev in self._history if ev.rnc == rnc]
+        matches.sort(key=lambda ev: ev.id or 0, reverse=True)
+        return matches[:limit]
+
+    def begin_sync_tracking(self) -> None:
+        self._seen_rncs.clear()
+
+    def upsert_batch(
+        self,
+        items: list[Contribuyente],
+        sync_run_id: int | None = None,
+        record_history: bool = False,
+        track_seen: bool = False,
+    ) -> tuple[int, int]:
         changed = 0
+        now = datetime.now(timezone.utc)
         for item in items:
+            if track_seen:
+                self._seen_rncs.add(item.rnc)
+
             existing = self.data.get(item.rnc)
-            if existing is None or (
+            if existing is None:
+                changed += 1
+                if record_history:
+                    self._append_history(
+                        rnc=item.rnc,
+                        sync_run_id=sync_run_id,
+                        cambio_tipo="ALTA",
+                        razon_social_nueva=item.razon_social,
+                        actividad_nueva=item.actividad_economica,
+                        estatus_nuevo=item.estatus,
+                        regimen_nuevo=item.regimen,
+                        detected_at=now,
+                    )
+                self.data[item.rnc] = replace(item, en_padron=True, updated_at=now)
+                continue
+
+            reentered = not existing.en_padron
+            data_changed = (
                 existing.razon_social,
                 existing.actividad_economica,
-                existing.fecha_inicio_operaciones,
                 existing.estatus,
                 existing.regimen,
             ) != (
                 item.razon_social,
                 item.actividad_economica,
-                item.fecha_inicio_operaciones,
                 item.estatus,
                 item.regimen,
-            ):
+            )
+            fecha_changed = existing.fecha_inicio_operaciones != item.fecha_inicio_operaciones
+
+            if reentered or data_changed:
+                if record_history:
+                    tipo = "REINGRESO" if reentered else "ACTUALIZACION"
+                    self._append_history(
+                        rnc=item.rnc,
+                        sync_run_id=sync_run_id,
+                        cambio_tipo=tipo,
+                        razon_social_anterior=(
+                            existing.razon_social
+                            if reentered or existing.razon_social != item.razon_social
+                            else None
+                        ),
+                        razon_social_nueva=(
+                            item.razon_social
+                            if reentered or existing.razon_social != item.razon_social
+                            else None
+                        ),
+                        actividad_anterior=(
+                            existing.actividad_economica
+                            if reentered
+                            or existing.actividad_economica != item.actividad_economica
+                            else None
+                        ),
+                        actividad_nueva=(
+                            item.actividad_economica
+                            if reentered
+                            or existing.actividad_economica != item.actividad_economica
+                            else None
+                        ),
+                        estatus_anterior=(
+                            existing.estatus
+                            if reentered or existing.estatus != item.estatus
+                            else None
+                        ),
+                        estatus_nuevo=(
+                            item.estatus
+                            if reentered or existing.estatus != item.estatus
+                            else None
+                        ),
+                        regimen_anterior=(
+                            existing.regimen
+                            if reentered or existing.regimen != item.regimen
+                            else None
+                        ),
+                        regimen_nuevo=(
+                            item.regimen
+                            if reentered or existing.regimen != item.regimen
+                            else None
+                        ),
+                        detected_at=now,
+                    )
                 changed += 1
-            self.data[item.rnc] = item
+                self.data[item.rnc] = replace(item, en_padron=True, updated_at=now)
+            elif fecha_changed:
+                changed += 1
+                self.data[item.rnc] = replace(item, en_padron=True, updated_at=now)
+
         return len(items), changed
+
+    def finalize_sync_tracking(
+        self,
+        sync_run_id: int | None,
+        processed_count: int,
+        record_history: bool = False,
+    ) -> int:
+        prev_active = sum(1 for item in self.data.values() if item.en_padron)
+        if prev_active > 1000 and processed_count < prev_active * 0.5:
+            self._seen_rncs.clear()
+            return 0
+
+        now = datetime.now(timezone.utc)
+        bajas = 0
+        for rnc, existing in list(self.data.items()):
+            if existing.en_padron and rnc not in self._seen_rncs:
+                bajas += 1
+                self.data[rnc] = replace(existing, en_padron=False, updated_at=now)
+                if record_history:
+                    self._append_history(
+                        rnc=rnc,
+                        sync_run_id=sync_run_id,
+                        cambio_tipo="BAJA_PADRON",
+                        razon_social_anterior=existing.razon_social,
+                        actividad_anterior=existing.actividad_economica,
+                        estatus_anterior=existing.estatus,
+                        regimen_anterior=existing.regimen,
+                        detected_at=now,
+                    )
+        self._seen_rncs.clear()
+        return bajas
+
+    def _append_history(
+        self,
+        rnc: str,
+        sync_run_id: int | None,
+        cambio_tipo: str,
+        razon_social_anterior: str | None = None,
+        razon_social_nueva: str | None = None,
+        actividad_anterior: str | None = None,
+        actividad_nueva: str | None = None,
+        estatus_anterior: str | None = None,
+        estatus_nuevo: str | None = None,
+        regimen_anterior: str | None = None,
+        regimen_nuevo: str | None = None,
+        detected_at: datetime | None = None,
+    ) -> None:
+        hid = self._next_history_id
+        self._next_history_id += 1
+        self._history.append(
+            ContribuyenteCambio(
+                id=hid,
+                rnc=rnc,
+                sync_run_id=sync_run_id,
+                cambio_tipo=cambio_tipo,
+                razon_social_anterior=razon_social_anterior,
+                razon_social_nueva=razon_social_nueva,
+                actividad_anterior=actividad_anterior,
+                actividad_nueva=actividad_nueva,
+                estatus_anterior=estatus_anterior,
+                estatus_nuevo=estatus_nuevo,
+                regimen_anterior=regimen_anterior,
+                regimen_nuevo=regimen_nuevo,
+                detected_at=detected_at or datetime.now(timezone.utc),
+            )
+        )
 
     @contextmanager
     def sync_lock(self) -> Iterator[bool]:

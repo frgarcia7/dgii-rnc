@@ -17,6 +17,7 @@ from app.application.use_cases import (
     BatchLookupRncUseCase,
     CheckHealthUseCase,
     GetContribuyenteByRncUseCase,
+    GetContribuyenteHistoryUseCase,
     GetStatsUseCase,
     InitializeCatalogUseCase,
     SearchContribuyentesUseCase,
@@ -62,6 +63,7 @@ class AppContainer:
     scheduler: DailySyncScheduler | None
     init_uc: InitializeCatalogUseCase
     get_by_rnc_uc: GetContribuyenteByRncUseCase
+    history_uc: GetContribuyenteHistoryUseCase
     validate_rnc_uc: ValidateRncUseCase
     batch_lookup_uc: BatchLookupRncUseCase
     search_uc: SearchContribuyentesUseCase
@@ -104,6 +106,7 @@ def build_container(settings: Settings) -> AppContainer:
     get_by_rnc_uc = GetContribuyenteByRncUseCase(
         repository=repository, lookup_cache=lookup_cache
     )
+    history_uc = GetContribuyenteHistoryUseCase(repository=repository)
     validate_rnc_uc = ValidateRncUseCase(
         repository=repository, lookup_cache=lookup_cache
     )
@@ -131,6 +134,7 @@ def build_container(settings: Settings) -> AppContainer:
         scheduler=scheduler,
         init_uc=init_uc,
         get_by_rnc_uc=get_by_rnc_uc,
+        history_uc=history_uc,
         validate_rnc_uc=validate_rnc_uc,
         batch_lookup_uc=batch_lookup_uc,
         search_uc=search_uc,

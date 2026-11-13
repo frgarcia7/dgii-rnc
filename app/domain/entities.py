@@ -115,6 +115,26 @@ class Contribuyente:
     estatus: str
     regimen: str
     updated_at: datetime | None = None
+    en_padron: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ContribuyenteCambio:
+    """Representa un cambio histórico detectado para un contribuyente entre sincronizaciones."""
+
+    id: int | None
+    rnc: str
+    sync_run_id: int | None
+    cambio_tipo: str
+    razon_social_anterior: str | None = None
+    razon_social_nueva: str | None = None
+    actividad_anterior: str | None = None
+    actividad_nueva: str | None = None
+    estatus_anterior: str | None = None
+    estatus_nuevo: str | None = None
+    regimen_anterior: str | None = None
+    regimen_nuevo: str | None = None
+    detected_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

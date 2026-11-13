@@ -15,8 +15,10 @@ API REST y buscador web **open-source y self-hosted** en **FastAPI + PostgreSQL 
 - **Listo para toda la empresa:** Incluye interfaz web integrada en `/` (búsqueda individual y validación en lote para reportes 606/607 con exportación a CSV) y documentación API en `/docs` y `/redoc`.
 - **Validación dominicana completa:** Verifica dígito verificador con **Módulo 11 (RNC de 9 dígitos)** y **Módulo 10 / Luhn (Cédula de 11 dígitos)** además de consultar el padrón local.
 - **Consultas en lote:** `POST /api/v1/rnc/batch` resuelve listas de hasta 200 RNCs/Cédulas en una sola consulta SQL.
-- **Búsqueda inteligente en español:** Combina `pg_trgm` + `unaccent` (`immutable_unaccent`) para encontrar `"CLÍNICA"` aunque busques `"clinica"`, priorizando coincidencias exactas de prefijo y similitud, con filtros por `estatus`, `regimen` y `actividad`.
+- **Búsqueda inteligente en español:** Combina Full-Text Search en español + `pg_trgm` (`word_similarity`) + `unaccent` (`immutable_unaccent`) para tolerar tildes, múltiples palabras en distinto orden (ej. `"ferreteria ochoa"`), prefijos numéricos de RNC y errores tipográficos leves, con filtros por `estatus`, `regimen` y `actividad` (incluso sin `query`).
+- **Trazabilidad del padrón:** Registra `ALTA`, `ACTUALIZACION`, `BAJA_PADRON` y `REINGRESO` entre sincronizaciones (`GET /api/v1/rnc/{rnc}/historial`) y expone el indicador `en_padron`.
 - **Sincronización eficiente y resiliente:**
+  - Parser tolerante a UTF-8/Windows-1252 y delimitadores `,`, `;` o `|` tanto en ZIP como en archivos planos.
   - Descarga en streaming (`SpooledTemporaryFile`, sin cargar el archivo completo en RAM) con reintentos automáticos.
   - Caché por `ETag` y `SHA-256` para omitir descargas/escrituras cuando el padrón no ha cambiado.
   - `UPSERT` inteligente (`IS DISTINCT FROM`) que solo actualiza `updated_at` cuando un contribuyente cambia realmente.
@@ -119,8 +121,9 @@ python -m app.cli sync --file /ruta/RNC_CONTRIBUYENTES.zip
 | `GET` | `/` | Interfaz web local para consultas individuales y lotes 606/607 |
 | `GET` | `/api/v1/rnc/{rnc}` | Consulta exacta por RNC o Cédula (con o sin guiones) |
 | `GET` | `/api/v1/rnc/{rnc}/validar` | Valida dígito verificador (Módulo 11 / Módulo 10) y verifica registro |
+| `GET` | `/api/v1/rnc/{rnc}/historial` | Consulta cambios históricos del contribuyente entre sincronizaciones |
 | `POST` | `/api/v1/rnc/batch` | Consulta múltiple por lista JSON de RNCs/Cédulas |
-| `GET` | `/api/v1/buscar?query=...` | Búsqueda parcial insensible a tildes con filtros (`estatus`, `regimen`, `actividad`) y paginación (`total`, `has_more`) |
+| `GET` | `/api/v1/buscar?query=...` | Búsqueda inteligente (`query` y/o `actividad`, RNC parcial, `estatus`, `regimen`) con paginación |
 | `GET` | `/api/v1/stats` | Total de contribuyentes, desglose por estatus/régimen y último sync |
 | `POST` | `/api/v1/sync` | Dispara sincronización en segundo plano (`?force=true` ignora ETag/SHA-256) |
 | `GET` | `/api/v1/sync/status` | Estado actual y resultado de la última sincronización |
@@ -137,8 +140,12 @@ curl http://localhost:8000/api/v1/rnc/130-66304-1
 # Validar dígito verificador + registro
 curl http://localhost:8000/api/v1/rnc/130-66304-1/validar
 
-# Búsqueda por razón social filtrada por estatus
+# Búsqueda por razón social o actividad económica
 curl "http://localhost:8000/api/v1/buscar?query=clinica&estatus=ACTIVO&limit=10"
+curl "http://localhost:8000/api/v1/buscar?actividad=ferreteria&estatus=ACTIVO&limit=10"
+
+# Historial de cambios de un RNC
+curl http://localhost:8000/api/v1/rnc/130-66304-1/historial
 
 # Consulta en lote (606/607)
 curl -X POST http://localhost:8000/api/v1/rnc/batch \

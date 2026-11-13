@@ -289,6 +289,32 @@
       gap: 10px;
     }
     .hidden { display: none; }
+    .batch-label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .batch-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .badge-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 6px;
+    }
+    .card-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .table-wrap {
+      width: 100%;
+      overflow-x: auto;
+    }
     .alert {
       padding: 12px 14px;
       border-radius: 8px;
@@ -371,11 +397,11 @@
 
     <section id="tab-batch" class="card hidden">
       <form id="batchForm">
-        <label for="batchInput" style="display:block;font-weight:600;margin-bottom:8px;">
-          Pega hasta 200 RNCs o Cédulas (uno por línea, o separados por coma):
+        <label for="batchInput" id="batchLimitLabel" class="batch-label">
+          Pega RNCs o Cédulas (uno por línea, o separados por coma; lotes automáticos de hasta 200):
         </label>
         <textarea id="batchInput" placeholder="130-66304-1&#10;101010101&#10;00112345678"></textarea>
-        <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;">
+        <div class="batch-actions">
           <button class="btn" type="submit" id="batchBtn">Consultar Lote</button>
           <button class="btn btn-secondary hidden" type="button" id="exportCsvBtn">Exportar CSV</button>
         </div>
@@ -392,6 +418,7 @@
     const API_BASE = "/api/v1";
     let currentOffset = 0;
     const PAGE_LIMIT = 20;
+    let maxBatchItems = 200;
     let lastBatchData = null;
 
     function getApiHeaders() {
@@ -404,7 +431,9 @@
       const resp = await fetch(`${API_BASE}${path}`, { ...options, headers });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        throw new Error(data.detail || `Error HTTP ${resp.status}`);
+        const retryAfter = resp.headers.get("Retry-After");
+        const suffix = retryAfter && resp.status === 429 ? ` (espera ${retryAfter}s)` : "";
+        throw new Error((data.detail || `Error HTTP ${resp.status}`) + suffix);
       }
       return data;
     }
@@ -445,11 +474,7 @@
       const left = el("div");
       left.appendChild(el("h3", "result-title", item.razon_social));
 
-      const badges = el("div", "");
-      badges.style.display = "flex";
-      badges.style.gap = "6px";
-      badges.style.flexWrap = "wrap";
-      badges.style.marginTop = "6px";
+      const badges = el("div", "badge-row");
       badges.appendChild(el("span", statusBadgeClass(item.estatus), item.estatus || "N/D"));
       badges.appendChild(el("span", "badge badge-info", `${item.tipo} · ${item.regimen || "N/D"}`));
       if (validation) {
@@ -463,9 +488,7 @@
       }
       left.appendChild(badges);
 
-      const actions = el("div");
-      actions.style.display = "flex";
-      actions.style.gap = "6px";
+      const actions = el("div", "card-actions");
       actions.appendChild(copyButton(item.rnc, `Copiar ${item.rnc}`));
       if (item.rnc_formateado && item.rnc_formateado !== item.rnc) {
         actions.appendChild(copyButton(item.rnc_formateado, `Copiar ${item.rnc_formateado}`));
@@ -578,6 +601,7 @@
       const rncs = raw.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean);
       const output = document.getElementById("batchOutput");
       const exportBtn = document.getElementById("exportCsvBtn");
+      const batchBtn = document.getElementById("batchBtn");
       exportBtn.classList.add("hidden");
 
       if (!rncs.length) {
@@ -585,26 +609,71 @@
         return;
       }
 
-      output.replaceChildren(el("div", "alert alert-info", `Consultando ${rncs.length} registros...`));
+      const chunkSize = Math.max(1, maxBatchItems || 200);
+      const chunks = [];
+      for (let i = 0; i < rncs.length; i += chunkSize) {
+        chunks.push(rncs.slice(i, i + chunkSize));
+      }
+
+      batchBtn.disabled = true;
+      const merged = {
+        requested: rncs.length,
+        found_count: 0,
+        results: [],
+        not_found: [],
+        invalid: [],
+      };
+      const seenFound = new Set();
+      const seenNotFound = new Set();
+
       try {
-        const data = await apiFetch("/rnc/batch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ rncs }),
-        });
-        lastBatchData = data;
+        for (let idx = 0; idx < chunks.length; idx++) {
+          const progressMsg =
+            chunks.length > 1
+              ? `Consultando lote ${idx + 1} de ${chunks.length} (${rncs.length} registros totales)...`
+              : `Consultando ${rncs.length} registros...`;
+          output.replaceChildren(el("div", "alert alert-info", progressMsg));
+
+          const data = await apiFetch("/rnc/batch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rncs: chunks[idx] }),
+          });
+          for (const item of data.results || []) {
+            if (!seenFound.has(item.rnc)) {
+              seenFound.add(item.rnc);
+              merged.results.push(item);
+            }
+          }
+          for (const nf of data.not_found || []) {
+            if (!seenNotFound.has(nf)) {
+              seenNotFound.add(nf);
+              merged.not_found.push(nf);
+            }
+          }
+          for (const inv of data.invalid || []) {
+            merged.invalid.push(inv);
+          }
+        }
+
+        merged.found_count = merged.results.length;
+        lastBatchData = merged;
         output.replaceChildren();
 
         output.appendChild(
           el(
             "div",
             "alert alert-info",
-            `Procesados: ${data.requested} · Encontrados: ${data.found_count} · No encontrados: ${data.not_found.length} · Inválidos: ${data.invalid.length}`
+            `Procesados: ${merged.requested} · Encontrados: ${merged.found_count} · No encontrados: ${merged.not_found.length} · Inválidos: ${merged.invalid.length}`
           )
         );
 
-        if (data.results.length) {
+        if (merged.results.length || merged.not_found.length || merged.invalid.length) {
           exportBtn.classList.remove("hidden");
+        }
+
+        if (merged.results.length) {
+          const tableWrap = el("div", "table-wrap");
           const table = el("table");
           const thead = el("thead");
           const hr = el("tr");
@@ -615,7 +684,7 @@
           table.appendChild(thead);
 
           const tbody = el("tbody");
-          for (const item of data.results) {
+          for (const item of merged.results) {
             const tr = el("tr");
             tr.appendChild(el("td", "mono", item.rnc_formateado || item.rnc));
             tr.appendChild(el("td", "", item.razon_social));
@@ -627,41 +696,56 @@
             tbody.appendChild(tr);
           }
           table.appendChild(tbody);
-          output.appendChild(table);
+          tableWrap.appendChild(table);
+          output.appendChild(tableWrap);
         }
 
-        if (data.not_found.length) {
+        if (merged.not_found.length) {
           output.appendChild(
-            el("div", "alert alert-warn", `No encontrados en padrón: ${data.not_found.join(", ")}`)
+            el("div", "alert alert-warn", `No encontrados en padrón: ${merged.not_found.join(", ")}`)
           );
         }
-        if (data.invalid.length) {
+        if (merged.invalid.length) {
           output.appendChild(
-            el("div", "alert alert-bad", `Formato inválido: ${data.invalid.join(", ")}`)
+            el("div", "alert alert-bad", `Formato inválido: ${merged.invalid.join(", ")}`)
           );
         }
       } catch (err) {
         output.replaceChildren(el("div", "alert alert-bad", err.message));
+      } finally {
+        batchBtn.disabled = false;
       }
+    }
+
+    function escapeCsvCell(value) {
+      let text = String(value ?? "");
+      if (/^[=+\-@\t\r]/.test(text)) {
+        text = `'${text}`;
+      }
+      return `"${text.replace(/"/g, '""')}"`;
     }
 
     function exportBatchCsv() {
       if (!lastBatchData) return;
-      const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-      const lines = [["RNC", "RNC_FORMATEADO", "TIPO", "RAZON_SOCIAL", "ESTATUS", "REGIMEN", "ACTIVIDAD_ECONOMICA"].join(",")];
+      const lines = [
+        ["RNC", "RNC_FORMATEADO", "TIPO", "RAZON_SOCIAL", "ESTATUS", "REGIMEN", "ACTIVIDAD_ECONOMICA"].join(","),
+      ];
       for (const item of lastBatchData.results) {
         lines.push([
-          esc(item.rnc),
-          esc(item.rnc_formateado),
-          esc(item.tipo),
-          esc(item.razon_social),
-          esc(item.estatus),
-          esc(item.regimen),
-          esc(item.actividad_economica),
+          escapeCsvCell(item.rnc),
+          escapeCsvCell(item.rnc_formateado),
+          escapeCsvCell(item.tipo),
+          escapeCsvCell(item.razon_social),
+          escapeCsvCell(item.estatus),
+          escapeCsvCell(item.regimen),
+          escapeCsvCell(item.actividad_economica),
         ].join(","));
       }
       for (const nf of lastBatchData.not_found) {
-        lines.push([esc(nf), "", "", esc("NO ENCONTRADO"), "", "", ""].join(","));
+        lines.push([escapeCsvCell(nf), "", "", escapeCsvCell("NO ENCONTRADO"), escapeCsvCell("NO ENCONTRADO"), "", ""].join(","));
+      }
+      for (const inv of lastBatchData.invalid) {
+        lines.push([escapeCsvCell(inv), "", "", escapeCsvCell("FORMATO INVÁLIDO"), escapeCsvCell("FORMATO INVÁLIDO"), "", ""].join(","));
       }
       const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
@@ -677,7 +761,18 @@
       const statsText = document.getElementById("statsText");
       const syncText = document.getElementById("lastSyncText");
       try {
-        const health = await fetch("/health").then((r) => r.json());
+        const healthResp = await fetch("/health");
+        if (!healthResp.ok) {
+          throw new Error(`HTTP ${healthResp.status}`);
+        }
+        const health = await healthResp.json();
+        if (health.batch_max_items) {
+          maxBatchItems = Number(health.batch_max_items) || 200;
+          const label = document.getElementById("batchLimitLabel");
+          if (label) {
+            label.textContent = `Pega RNCs o Cédulas (uno por línea, o separados por coma; lotes automáticos de ${maxBatchItems} por petición):`;
+          }
+        }
         if (health.initializing) {
           badge.className = "badge badge-warn";
           badge.textContent = "Cargando padrón inicial...";

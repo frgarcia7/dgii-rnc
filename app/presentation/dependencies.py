@@ -1,4 +1,4 @@
-"""Proveedores de dependencias FastAPI y autenticación opcional por API Key."""
+"""Proveedores de dependencias FastAPI, autenticación y rate limiting."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from app.application.use_cases import (
     ValidateRncUseCase,
 )
 from app.core.config import Settings
+from app.presentation.rate_limit import enforce_rate_limit, is_loopback_request
 
 
 def get_settings(request: Request) -> Settings:
@@ -80,6 +81,19 @@ def _verify_expected_key(
         )
 
 
+def has_valid_sync_key(
+    settings: Settings,
+    x_api_key: str | None,
+    authorization: str | None,
+) -> bool:
+    """Indica si el llamador presentó una clave administrativa válida."""
+    expected = settings.api.sync_api_key or settings.api.api_key
+    if not expected:
+        return False
+    provided = _extract_provided_key(x_api_key, authorization)
+    return bool(provided and hmac.compare_digest(provided, expected))
+
+
 def require_api_key(
     request: Request,
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
@@ -95,7 +109,34 @@ def require_sync_api_key(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> None:
-    """Valida SYNC_API_KEY (o API_KEY de respaldo) en endpoints administrativos."""
+    """Valida SYNC_API_KEY (o loopback en modo seguro) en endpoints administrativos."""
     settings: Settings = request.app.state.settings
     expected = settings.api.sync_api_key or settings.api.api_key
-    _verify_expected_key(expected, x_api_key, authorization)
+    if expected:
+        _verify_expected_key(expected, x_api_key, authorization)
+        return
+
+    if not settings.api.allow_unauthenticated_sync and not is_loopback_request(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "La sincronización manual sin SYNC_API_KEY solo está permitida desde localhost. "
+                "Configura SYNC_API_KEY o utiliza 'python -m app.cli sync'."
+            ),
+        )
+
+
+def rate_limit_lookup(request: Request) -> None:
+    enforce_rate_limit(request, "lookup")
+
+
+def rate_limit_search(request: Request) -> None:
+    enforce_rate_limit(request, "search")
+
+
+def rate_limit_batch(request: Request) -> None:
+    enforce_rate_limit(request, "batch")
+
+
+def rate_limit_sync(request: Request) -> None:
+    enforce_rate_limit(request, "sync")

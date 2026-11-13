@@ -160,14 +160,39 @@ class PostgresContribuyenteRepository:
                 )
                 cur.execute(
                     """
+                    CREATE INDEX IF NOT EXISTS idx_contribuyentes_razon_social_prefix
+                    ON contribuyentes (LOWER(immutable_unaccent(razon_social)) text_pattern_ops);
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_contribuyentes_actividad_unaccent_trgm
+                    ON contribuyentes
+                    USING gin (immutable_unaccent(actividad_economica) gin_trgm_ops);
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_contribuyentes_estatus
                     ON contribuyentes (estatus);
                     """
                 )
                 cur.execute(
                     """
+                    CREATE INDEX IF NOT EXISTS idx_contribuyentes_estatus_upper
+                    ON contribuyentes (UPPER(estatus));
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_contribuyentes_regimen
                     ON contribuyentes (regimen);
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_contribuyentes_regimen_upper
+                    ON contribuyentes (UPPER(regimen));
                     """
                 )
                 cur.execute(
@@ -204,6 +229,13 @@ class PostgresContribuyenteRepository:
                 cur.execute("SELECT COUNT(*) AS total FROM contribuyentes;")
                 row = cur.fetchone()
                 return int(row["total"]) if row else 0
+
+    def has_records(self) -> bool:
+        with self._conn_manager.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT EXISTS (SELECT 1 FROM contribuyentes) AS has_records;")
+                row = cur.fetchone()
+                return bool(row and row["has_records"])
 
     def get_by_rnc(self, rnc: str) -> Contribuyente | None:
         with self._conn_manager.connection() as conn:
@@ -247,8 +279,17 @@ class PostgresContribuyenteRepository:
         contains_pattern = f"%{escaped_query}%"
         prefix_pattern = f"{escaped_query}%"
 
-        clauses = ["immutable_unaccent(razon_social) ILIKE immutable_unaccent(%s) ESCAPE '\\'"]
-        where_params: list[Any] = [contains_pattern]
+        if len(query) < 3:
+            clauses = [
+                "LOWER(immutable_unaccent(razon_social)) "
+                "LIKE LOWER(immutable_unaccent(%s)) ESCAPE '\\'"
+            ]
+            where_params: list[Any] = [prefix_pattern]
+        else:
+            clauses = [
+                "immutable_unaccent(razon_social) ILIKE immutable_unaccent(%s) ESCAPE '\\'"
+            ]
+            where_params = [contains_pattern]
 
         if estatus:
             clauses.append("UPPER(estatus) = %s")
@@ -366,6 +407,64 @@ class PostgresContribuyenteRepository:
                             "No se pudo liberar el advisory lock explícitamente; "
                             "se liberará al cerrar la sesión."
                         )
+
+    def is_sync_locked(self) -> bool:
+        """Verifica en pg_locks si algún proceso mantiene el bloqueo de sincronización."""
+        with self._conn_manager.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_locks
+                        WHERE locktype = 'advisory'
+                          AND objsubid = 1
+                          AND ((classid::bigint << 32) + objid::bigint) = %s
+                          AND granted
+                    ) AS locked;
+                    """,
+                    (_SYNC_ADVISORY_LOCK_KEY,),
+                )
+                row = cur.fetchone()
+                return bool(row and row["locked"])
+
+    def cleanup_stale_sync_runs(self) -> int:
+        """Marca como interrumpidas las filas 'running' cuando no hay lock activo."""
+        with self._conn_manager.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_try_advisory_lock(%s) AS locked;",
+                    (_SYNC_ADVISORY_LOCK_KEY,),
+                )
+                row = cur.fetchone()
+                if not (row and row["locked"]):
+                    return 0
+                try:
+                    cur.execute(
+                        """
+                        UPDATE sync_runs
+                        SET
+                            status = 'interrupted',
+                            error_message = COALESCE(
+                                error_message,
+                                'Sincronización interrumpida por reinicio del servicio.'
+                            ),
+                            finished_at = NOW()
+                        WHERE status = 'running';
+                        """
+                    )
+                    return max(cur.rowcount, 0)
+                finally:
+                    cur.execute(
+                        "SELECT pg_advisory_unlock(%s);",
+                        (_SYNC_ADVISORY_LOCK_KEY,),
+                    )
+
+    def analyze_catalog(self) -> None:
+        """Actualiza estadísticas del planificador de consultas tras cambios masivos."""
+        with self._conn_manager.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("ANALYZE contribuyentes;")
 
     def get_last_successful_sync(self) -> SyncRun | None:
         with self._conn_manager.connection() as conn:

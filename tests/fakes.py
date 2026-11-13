@@ -32,20 +32,40 @@ class InMemoryRepo:
         self._lock = threading.Lock()
         self._runs: list[SyncRun] = []
         self._next_run_id = 1
+        self.count_calls = 0
+        self.stats_calls = 0
+        self.get_by_rnc_calls = 0
+        self.analyze_calls = 0
+        self.fail_next_error: Exception | None = None
         self.data: dict[str, Contribuyente] = {
             item.rnc: item for item in (initial or [])
         }
+
+    def _maybe_fail(self) -> None:
+        if self.fail_next_error is not None:
+            exc = self.fail_next_error
+            self.fail_next_error = None
+            raise exc
 
     def init_schema(self) -> None:
         self.schema_initialized = True
 
     def count(self) -> int:
+        self._maybe_fail()
+        self.count_calls += 1
         return len(self.data)
 
+    def has_records(self) -> bool:
+        self._maybe_fail()
+        return bool(self.data)
+
     def get_by_rnc(self, rnc: str) -> Contribuyente | None:
+        self._maybe_fail()
+        self.get_by_rnc_calls += 1
         return self.data.get(rnc)
 
     def get_by_rncs(self, rncs: list[str]) -> list[Contribuyente]:
+        self._maybe_fail()
         return [self.data[rnc] for rnc in rncs if rnc in self.data]
 
     def search_by_razon_social(
@@ -57,6 +77,7 @@ class InMemoryRepo:
         regimen: str | None = None,
         actividad: str | None = None,
     ) -> SearchResult:
+        self._maybe_fail()
         q = _strip_accents(query)
         act_q = _strip_accents(actividad) if actividad else None
 
@@ -112,6 +133,35 @@ class InMemoryRepo:
         finally:
             if acquired:
                 self._lock.release()
+
+    def is_sync_locked(self) -> bool:
+        return self.lock_busy or self._lock.locked()
+
+    def cleanup_stale_sync_runs(self) -> int:
+        if self.is_sync_locked():
+            return 0
+        cleaned = 0
+        for idx, run in enumerate(self._runs):
+            if run.status == "running":
+                cleaned += 1
+                self._runs[idx] = SyncRun(
+                    id=run.id,
+                    status="interrupted",
+                    source=run.source,
+                    processed=run.processed,
+                    changed=run.changed,
+                    elapsed_seconds=run.elapsed_seconds,
+                    etag=run.etag,
+                    content_hash=run.content_hash,
+                    error_message=run.error_message
+                    or "Sincronización interrumpida por reinicio del servicio.",
+                    started_at=run.started_at,
+                    finished_at=datetime.now(timezone.utc),
+                )
+        return cleaned
+
+    def analyze_catalog(self) -> None:
+        self.analyze_calls += 1
 
     def get_last_successful_sync(self) -> SyncRun | None:
         for run in reversed(self._runs):
@@ -170,6 +220,8 @@ class InMemoryRepo:
                 return
 
     def get_stats(self, is_syncing: bool) -> CatalogStats:
+        self._maybe_fail()
+        self.stats_calls += 1
         by_estatus: dict[str, int] = {}
         by_regimen: dict[str, int] = {}
         for item in self.data.values():

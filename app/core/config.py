@@ -22,6 +22,22 @@ def _parse_int(env_name: str, default: int, min_val: int, max_val: int) -> int:
     return value
 
 
+def _parse_float(
+    env_name: str, default: float, min_val: float, max_val: float
+) -> float:
+    """Lee y valida un número decimal desde variables de entorno."""
+    raw = os.getenv(env_name, str(default))
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"La variable {env_name}='{raw}' debe ser un número.") from exc
+    if not (min_val <= value <= max_val):
+        raise ValueError(
+            f"La variable {env_name}={value} debe estar entre {min_val} y {max_val}."
+        )
+    return value
+
+
 def _parse_bool(env_name: str, default: bool) -> bool:
     """Lee y valida un booleano desde variables de entorno."""
     raw = os.getenv(env_name)
@@ -64,6 +80,7 @@ class DatabaseSettings:
     name: str
     pool_min: int = 1
     pool_max: int = 10
+    pool_timeout_seconds: float = 5.0
     statement_timeout_ms: int = 5_000
 
 
@@ -84,14 +101,31 @@ class SyncSettings:
 
 @dataclass(frozen=True, slots=True)
 class ApiSettings:
-    """Parámetros HTTP, seguridad opcional y límites operativos."""
+    """Parámetros HTTP, seguridad opcional, caché y límites operativos."""
 
     cors_origins: tuple[str, ...] = ("*",)
     api_key: str | None = None
     sync_api_key: str | None = None
     enable_manual_sync: bool = True
+    allow_unauthenticated_sync: bool = False
     batch_max_items: int = 200
     cache_max_age_seconds: int = 300
+    stats_cache_ttl_seconds: int = 300
+    lookup_cache_size: int = 2048
+    lookup_cache_ttl_seconds: int = 300
+
+
+@dataclass(frozen=True, slots=True)
+class RateLimitSettings:
+    """Límites de tasa por IP para despliegues públicos self-hosted."""
+
+    enabled: bool = True
+    trust_proxy_headers: bool = False
+    lookup_per_minute: int = 120
+    search_per_minute: int = 30
+    batch_per_minute: int = 15
+    sync_per_minute: int = 5
+    api_key_multiplier: int = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +138,7 @@ class Settings:
     database: DatabaseSettings
     sync: SyncSettings
     api: ApiSettings = ApiSettings()
+    rate_limit: RateLimitSettings = RateLimitSettings()
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -127,6 +162,9 @@ class Settings:
                 name=os.getenv("DB_NAME", "dgii_rnc"),
                 pool_min=pool_min,
                 pool_max=pool_max,
+                pool_timeout_seconds=_parse_float(
+                    "DB_POOL_TIMEOUT_SECONDS", 5.0, 0.5, 60.0
+                ),
                 statement_timeout_ms=_parse_int(
                     "DB_STATEMENT_TIMEOUT_MS", 5_000, 500, 60_000
                 ),
@@ -147,7 +185,36 @@ class Settings:
                 api_key=_optional_str("API_KEY"),
                 sync_api_key=_optional_str("SYNC_API_KEY"),
                 enable_manual_sync=_parse_bool("ENABLE_MANUAL_SYNC", True),
+                allow_unauthenticated_sync=_parse_bool(
+                    "ALLOW_UNAUTHENTICATED_SYNC", False
+                ),
                 batch_max_items=_parse_int("BATCH_MAX_ITEMS", 200, 1, 1000),
                 cache_max_age_seconds=_parse_int("CACHE_MAX_AGE_SECONDS", 300, 0, 86400),
+                stats_cache_ttl_seconds=_parse_int(
+                    "STATS_CACHE_TTL_SECONDS", 300, 0, 86400
+                ),
+                lookup_cache_size=_parse_int("LOOKUP_CACHE_SIZE", 2048, 0, 50000),
+                lookup_cache_ttl_seconds=_parse_int(
+                    "LOOKUP_CACHE_TTL_SECONDS", 300, 0, 86400
+                ),
+            ),
+            rate_limit=RateLimitSettings(
+                enabled=_parse_bool("RATE_LIMIT_ENABLED", True),
+                trust_proxy_headers=_parse_bool("TRUST_PROXY_HEADERS", False),
+                lookup_per_minute=_parse_int(
+                    "RATE_LIMIT_LOOKUP_PER_MINUTE", 120, 1, 10000
+                ),
+                search_per_minute=_parse_int(
+                    "RATE_LIMIT_SEARCH_PER_MINUTE", 30, 1, 10000
+                ),
+                batch_per_minute=_parse_int(
+                    "RATE_LIMIT_BATCH_PER_MINUTE", 15, 1, 10000
+                ),
+                sync_per_minute=_parse_int(
+                    "RATE_LIMIT_SYNC_PER_MINUTE", 5, 1, 1000
+                ),
+                api_key_multiplier=_parse_int(
+                    "RATE_LIMIT_API_KEY_MULTIPLIER", 5, 1, 100
+                ),
             ),
         )

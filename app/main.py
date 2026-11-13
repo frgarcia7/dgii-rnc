@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
+import re
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+from app.application.cache import TtlLruCache
 from app.application.use_cases import (
     BatchLookupRncUseCase,
     CheckHealthUseCase,
@@ -20,12 +24,17 @@ from app.application.use_cases import (
     ValidateRncUseCase,
 )
 from app.core.config import Settings
+from app.domain.entities import CatalogStats, Contribuyente
 from app.infrastructure.db.connection import PostgresConnectionManager
 from app.infrastructure.db.postgres_repository import PostgresContribuyenteRepository
 from app.infrastructure.dgii.http_zip_source import HttpDgiiZipSource
 from app.infrastructure.scheduler.cron import DailySyncScheduler
 from app.presentation.exception_handlers import register_exception_handlers
+from app.presentation.rate_limit import SlidingWindowRateLimiter
 from app.presentation.routers import contribuyentes, health, sync, web
+
+logger = logging.getLogger(__name__)
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 OPENAPI_TAGS = [
     {
@@ -62,7 +71,7 @@ class AppContainer:
 
 
 def build_container(settings: Settings) -> AppContainer:
-    """Ensambla infraestructura, casos de uso y cronjob (inversión de dependencias)."""
+    """Ensambla infraestructura, cachés, casos de uso y cronjob."""
     conn_manager = PostgresConnectionManager(settings.database)
     repository = PostgresContribuyenteRepository(conn_manager)
     dgii_source = HttpDgiiZipSource(
@@ -72,20 +81,40 @@ def build_container(settings: Settings) -> AppContainer:
         local_zip_path=settings.sync.local_zip_path,
     )
 
+    lookup_cache: TtlLruCache[str, Contribuyente | None] = TtlLruCache(
+        maxsize=settings.api.lookup_cache_size,
+        ttl_seconds=settings.api.lookup_cache_ttl_seconds,
+    )
+    stats_cache: TtlLruCache[str, CatalogStats] = TtlLruCache(
+        maxsize=1,
+        ttl_seconds=settings.api.stats_cache_ttl_seconds,
+    )
+    count_cache: TtlLruCache[str, int] = TtlLruCache(
+        maxsize=1,
+        ttl_seconds=settings.api.stats_cache_ttl_seconds,
+    )
+
     sync_uc = SyncRncCatalogUseCase(
         repository=repository,
         source=dgii_source,
         batch_size=settings.sync.batch_size,
+        on_catalog_updated=(lookup_cache.clear, stats_cache.clear, count_cache.clear),
     )
     init_uc = InitializeCatalogUseCase(repository=repository, sync_use_case=sync_uc)
-    get_by_rnc_uc = GetContribuyenteByRncUseCase(repository=repository)
-    validate_rnc_uc = ValidateRncUseCase(repository=repository)
+    get_by_rnc_uc = GetContribuyenteByRncUseCase(
+        repository=repository, lookup_cache=lookup_cache
+    )
+    validate_rnc_uc = ValidateRncUseCase(
+        repository=repository, lookup_cache=lookup_cache
+    )
     batch_lookup_uc = BatchLookupRncUseCase(
         repository=repository, max_items=settings.api.batch_max_items
     )
     search_uc = SearchContribuyentesUseCase(repository=repository)
-    stats_uc = GetStatsUseCase(repository=repository, sync_use_case=sync_uc)
-    health_uc = CheckHealthUseCase(repository=repository)
+    stats_uc = GetStatsUseCase(
+        repository=repository, sync_use_case=sync_uc, stats_cache=stats_cache
+    )
+    health_uc = CheckHealthUseCase(repository=repository, count_cache=count_cache)
 
     scheduler = (
         DailySyncScheduler(
@@ -111,6 +140,27 @@ def build_container(settings: Settings) -> AppContainer:
     )
 
 
+def _log_startup_security_notices(settings: Settings) -> None:
+    if settings.database.password == "dgii_password":
+        logger.warning(
+            "DB_PASSWORD usa el valor por defecto; cámbialo antes de exponer este servicio."
+        )
+    if (
+        settings.api.enable_manual_sync
+        and not settings.api.sync_api_key
+        and not settings.api.api_key
+    ):
+        if settings.api.allow_unauthenticated_sync:
+            logger.warning(
+                "ALLOW_UNAUTHENTICATED_SYNC=true sin SYNC_API_KEY: "
+                "cualquier cliente puede disparar POST /api/v1/sync."
+            )
+        else:
+            logger.info(
+                "SYNC_API_KEY no definida: POST /api/v1/sync restringido a solicitudes locales."
+            )
+
+
 def create_app(
     settings: Settings | None = None,
     container: AppContainer | None = None,
@@ -130,6 +180,7 @@ def create_app(
         fastapi_app.state.settings = resolved_settings
         fastapi_app.state.container = resolved_container
         if run_startup:
+            _log_startup_security_notices(resolved_settings)
             resolved_container.init_uc.execute(run_async=True)
             if resolved_container.scheduler is not None:
                 resolved_container.scheduler.start()
@@ -147,7 +198,7 @@ def create_app(
         description=(
             "Servicio self-hosted construido con **Arquitectura Limpia** sobre FastAPI y "
             "PostgreSQL (`pg_trgm` + `unaccent`) para consultar contribuyentes de la Dirección "
-            "Impuestos Internos (DGII) de la República Dominicana.\n\n"
+            "General de Impuestos Internos (DGII) de la República Dominicana.\n\n"
             "- **Buscador Web:** `/` (consulta individual y validación en lote 606/607)\n"
             "- **Swagger UI:** `/docs`\n"
             "- **ReDoc:** `/redoc`\n"
@@ -169,6 +220,51 @@ def create_app(
     )
     fastapi_app.state.settings = resolved_settings
     fastapi_app.state.container = resolved_container
+    fastapi_app.state.rate_limiter = SlidingWindowRateLimiter()
+
+    @fastapi_app.middleware("http")
+    async def security_and_request_headers(request: Request, call_next) -> Response:
+        incoming_req_id = request.headers.get("x-request-id", "").strip()
+        request_id = (
+            incoming_req_id
+            if _REQUEST_ID_RE.match(incoming_req_id)
+            else uuid.uuid4().hex
+        )
+        request.state.request_id = request_id
+
+        try:
+            response: Response = await call_next(request)
+        except Exception as exc:
+            logger.exception(
+                "Error inesperado procesando %s %s (request_id=%s)",
+                request.method,
+                request.url.path,
+                request_id,
+                exc_info=exc,
+            )
+            response = JSONResponse(
+                status_code=500,
+                content={"detail": "Error interno del servidor."},
+            )
+
+        response.headers.setdefault("X-Request-ID", request_id)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault(
+            "Referrer-Policy", "strict-origin-when-cross-origin"
+        )
+        response.headers.setdefault(
+            "Permissions-Policy", "geolocation=(), microphone=(), camera=()"
+        )
+
+        rate_headers: dict[str, str] | None = getattr(
+            request.state, "rate_limit_headers", None
+        )
+        if rate_headers:
+            for key, value in rate_headers.items():
+                response.headers.setdefault(key, value)
+
+        return response
 
     fastapi_app.add_middleware(
         CORSMiddleware,

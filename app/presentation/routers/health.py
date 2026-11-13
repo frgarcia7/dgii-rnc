@@ -5,7 +5,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.application.use_cases import CheckHealthUseCase, InitializeCatalogUseCase
-from app.presentation.dependencies import get_health_use_case, get_init_use_case
+from app.core.config import Settings
+from app.presentation.dependencies import (
+    get_health_use_case,
+    get_init_use_case,
+    get_settings,
+)
 from app.presentation.schemas.contribuyente import ErrorResponse, HealthResponse
 
 router = APIRouter(tags=["Sistema"])
@@ -29,19 +34,21 @@ router = APIRouter(tags=["Sistema"])
 def healthcheck(
     health_uc: CheckHealthUseCase = Depends(get_health_use_case),
     init_uc: InitializeCatalogUseCase = Depends(get_init_use_case),
+    settings: Settings = Depends(get_settings),
 ) -> HealthResponse:
-    if not health_uc.execute():
+    healthy, catalog_ready, total = health_uc.get_health_snapshot()
+    if not healthy:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Base de datos no disponible.",
         )
 
-    total = health_uc.count_records()
     initializing = init_uc.is_initializing()
     return HealthResponse(
         status="ok",
         database="connected",
-        catalog_ready=total > 0,
+        catalog_ready=catalog_ready,
         initializing=initializing,
         total_contribuyentes=total,
+        batch_max_items=settings.api.batch_max_items,
     )

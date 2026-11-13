@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, Path, Query, Response, status
 
 from app.application.use_cases import (
@@ -19,6 +21,9 @@ from app.presentation.dependencies import (
     get_settings,
     get_stats_use_case,
     get_validate_use_case,
+    rate_limit_batch,
+    rate_limit_lookup,
+    rate_limit_search,
     require_api_key,
 )
 from app.presentation.schemas.contribuyente import (
@@ -36,6 +41,34 @@ router = APIRouter(
     dependencies=[Depends(require_api_key)],
 )
 
+_COMMON_RATE_AND_DB_RESPONSES: dict[int | str, dict[str, Any]] = {
+    status.HTTP_429_TOO_MANY_REQUESTS: {
+        "model": ErrorResponse,
+        "description": "Límite de consultas por minuto excedido.",
+    },
+    status.HTTP_503_SERVICE_UNAVAILABLE: {
+        "model": ErrorResponse,
+        "description": "Base de datos temporalmente saturada o no disponible.",
+    },
+}
+
+
+def _apply_cache_headers(
+    response: Response, settings: Settings, max_age_seconds: int | None = None
+) -> None:
+    ttl = (
+        settings.api.cache_max_age_seconds
+        if max_age_seconds is None
+        else max_age_seconds
+    )
+    if ttl <= 0:
+        return
+    if settings.api.api_key:
+        response.headers["Cache-Control"] = f"private, max-age={ttl}"
+        response.headers["Vary"] = "X-API-Key, Authorization"
+    else:
+        response.headers["Cache-Control"] = f"public, max-age={ttl}"
+
 
 @router.get(
     "/rnc/{rnc}/validar",
@@ -45,22 +78,27 @@ router = APIRouter(
         "Valida el dígito verificador (Módulo 11 para RNC de 9 dígitos, Módulo 10/Luhn "
         "para Cédula de 11 dígitos) y verifica si existe en el padrón local de la DGII."
     ),
+    dependencies=[Depends(rate_limit_lookup)],
     responses={
         status.HTTP_400_BAD_REQUEST: {
             "model": ErrorResponse,
             "description": "Entrada vacía.",
         },
+        **_COMMON_RATE_AND_DB_RESPONSES,
     },
 )
 def validate_rnc(
+    response: Response,
     rnc: str = Path(
         ...,
         description="RNC (9 dígitos) o Cédula (11 dígitos), con o sin guiones.",
         examples=["130-66304-1"],
     ),
     use_case: ValidateRncUseCase = Depends(get_validate_use_case),
+    settings: Settings = Depends(get_settings),
 ) -> RncValidationResponse:
     validation, contribuyente = use_case.execute(rnc)
+    _apply_cache_headers(response, settings)
     return RncValidationResponse.from_domain(validation, contribuyente)
 
 
@@ -72,11 +110,13 @@ def validate_rnc(
         "Consulta hasta el límite configurado (`BATCH_MAX_ITEMS`, por defecto 200) de RNCs/Cédulas "
         "en una sola petición SQL. Ideal para validar listas de proveedores en formatos 606/607."
     ),
+    dependencies=[Depends(rate_limit_batch)],
     responses={
         status.HTTP_400_BAD_REQUEST: {
             "model": ErrorResponse,
             "description": "Lista vacía o excede el límite máximo por lote.",
         },
+        **_COMMON_RATE_AND_DB_RESPONSES,
     },
 )
 def batch_lookup(
@@ -103,6 +143,7 @@ def batch_lookup(
         "Retorna los datos oficiales de un contribuyente dado su RNC o Cédula. "
         "Acepta valores con o sin guiones (por ejemplo, `101010101` o `1-01-01010-1`)."
     ),
+    dependencies=[Depends(rate_limit_lookup)],
     responses={
         status.HTTP_400_BAD_REQUEST: {
             "model": ErrorResponse,
@@ -112,6 +153,7 @@ def batch_lookup(
             "model": ErrorResponse,
             "description": "Contribuyente no encontrado en el padrón.",
         },
+        **_COMMON_RATE_AND_DB_RESPONSES,
     },
 )
 def get_by_rnc(
@@ -125,10 +167,7 @@ def get_by_rnc(
     settings: Settings = Depends(get_settings),
 ) -> ContribuyenteResponse:
     entity = use_case.execute(rnc)
-    if settings.api.cache_max_age_seconds > 0:
-        response.headers["Cache-Control"] = (
-            f"public, max-age={settings.api.cache_max_age_seconds}"
-        )
+    _apply_cache_headers(response, settings)
     return ContribuyenteResponse.from_domain(entity)
 
 
@@ -140,6 +179,7 @@ def get_by_rnc(
         "Búsqueda parcial insensible a mayúsculas y tildes (`unaccent` + `pg_trgm`) "
         "sobre `razon_social`, ordenada por relevancia y con filtros opcionales."
     ),
+    dependencies=[Depends(rate_limit_search)],
     responses={
         status.HTTP_400_BAD_REQUEST: {
             "model": ErrorResponse,
@@ -147,6 +187,11 @@ def get_by_rnc(
                 "El parámetro `query` tiene menos de 2 caracteres tras limpiar espacios."
             ),
         },
+        status.HTTP_504_GATEWAY_TIMEOUT: {
+            "model": ErrorResponse,
+            "description": "La búsqueda superó el tiempo máximo permitido en base de datos.",
+        },
+        **_COMMON_RATE_AND_DB_RESPONSES,
     },
 )
 def search_by_name(
@@ -167,7 +212,8 @@ def search_by_name(
     offset: int = Query(
         0,
         ge=0,
-        description="Desplazamiento para paginación.",
+        le=2000,
+        description="Desplazamiento para paginación (máximo 2000).",
     ),
     estatus: str | None = Query(
         default=None,
@@ -214,8 +260,17 @@ def search_by_name(
         "Retorna el total de contribuyentes almacenados, distribución por estatus/régimen "
         "y los datos de la última sincronización ejecutada."
     ),
+    dependencies=[Depends(rate_limit_lookup)],
+    responses=_COMMON_RATE_AND_DB_RESPONSES,
 )
 def get_stats(
+    response: Response,
     use_case: GetStatsUseCase = Depends(get_stats_use_case),
+    settings: Settings = Depends(get_settings),
 ) -> StatsResponse:
+    _apply_cache_headers(
+        response,
+        settings,
+        max_age_seconds=min(60, settings.api.cache_max_age_seconds),
+    )
     return StatsResponse.from_domain(use_case.execute())

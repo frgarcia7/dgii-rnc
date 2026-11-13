@@ -72,12 +72,33 @@ class TestPostgresIntegration(unittest.TestCase):
         self.assertEqual(search_res.total, 1)
         self.assertEqual(search_res.items[0].rnc, "130663041")
 
+        # Búsqueda de 2 caracteres usa prefijo indexado
+        prefix_res = self.repo.search_by_razon_social("cl", limit=10, offset=0)
+        self.assertEqual(prefix_res.total, 1)
+        self.assertEqual(prefix_res.items[0].rnc, "130663041")
+
+        # has_records, is_sync_locked y limpieza de corridas huérfanas
+        self.assertTrue(self.repo.has_records())
+        self.assertFalse(self.repo.is_sync_locked())
+
         # Filtro por estatus y lote
         batch = self.repo.get_by_rncs(["130663041", "101010101"])
         self.assertEqual(len(batch), 2)
 
         with self.repo.sync_lock() as acquired:
             self.assertTrue(acquired)
+            self.assertTrue(self.repo.is_sync_locked())
+
+        self.assertFalse(self.repo.is_sync_locked())
+
+        stale_id = self.repo.record_sync_start("https://dgii.gov.do/stale.zip")
+        assert stale_id is not None
+        self.assertEqual(self.repo.cleanup_stale_sync_runs(), 1)
+        latest_stale = self.repo.get_latest_sync()
+        assert latest_stale is not None
+        self.assertEqual(latest_stale.status, "interrupted")
+
+        self.repo.analyze_catalog()
 
         run_id = self.repo.record_sync_start("https://dgii.gov.do/test.zip")
         self.repo.record_sync_finish(

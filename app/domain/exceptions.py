@@ -22,3 +22,29 @@ class SyncAlreadyRunningError(DomainError):
 
     def __init__(self, message: str = "Ya existe una sincronización en curso.") -> None:
         super().__init__(message)
+
+
+class DatabaseTimeoutError(DomainError):
+    """Se lanza cuando una consulta excede el statement_timeout configurado en PostgreSQL."""
+
+    def __init__(
+        self,
+        message: str = (
+            "La consulta tardó demasiado tiempo en procesarse. "
+            "Intenta con un término más específico o agrega filtros."
+        ),
+    ) -> None:
+        super().__init__(message)
+
+
+class DatabaseUnavailableError(DomainError):
+    """Se lanza cuando el pool de conexiones está saturado o PostgreSQL no responde."""
+
+    def __init__(
+        self,
+        message: str = (
+            "El servicio está temporalmente saturado o la base de datos no responde. "
+            "Intenta nuevamente en unos segundos."
+        ),
+    ) -> None:
+        super().__init__(message)

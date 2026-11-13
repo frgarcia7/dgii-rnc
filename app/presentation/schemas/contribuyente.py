@@ -179,15 +179,25 @@ class SyncRunResponse(BaseModel):
     finished_at: datetime | None = None
 
     @classmethod
-    def from_domain(cls, run: SyncRun) -> SyncRunResponse:
+    def from_domain(cls, run: SyncRun, sanitize_internal: bool = False) -> SyncRunResponse:
+        source = run.source
+        error_message = run.error_message
+        if sanitize_internal:
+            if source.startswith("file://"):
+                source = "file://<local>"
+            if error_message:
+                error_message = (
+                    "Error durante la sincronización "
+                    "(consulta los logs del servidor o autentícate para ver el detalle)."
+                )
         return cls(
             id=run.id,
             status=run.status,
-            source=run.source,
+            source=source,
             processed=run.processed,
             changed=run.changed,
             elapsed_seconds=run.elapsed_seconds,
-            error_message=run.error_message,
+            error_message=error_message,
             started_at=run.started_at,
             finished_at=run.finished_at,
         )
@@ -262,6 +272,10 @@ class HealthResponse(BaseModel):
     )
     total_contribuyentes: int = Field(
         ..., description="Total de registros actualmente disponibles en el catálogo."
+    )
+    batch_max_items: int = Field(
+        default=200,
+        description="Límite máximo de RNCs/Cédulas aceptados por llamada en `/rnc/batch`.",
     )
 
 

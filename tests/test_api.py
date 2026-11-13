@@ -8,6 +8,7 @@ import unittest
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
+from app.application.cache import TtlLruCache
 from app.application.use_cases import (
     BatchLookupRncUseCase,
     CheckHealthUseCase,
@@ -18,8 +19,15 @@ from app.application.use_cases import (
     SyncRncCatalogUseCase,
     ValidateRncUseCase,
 )
-from app.core.config import ApiSettings, DatabaseSettings, Settings, SyncSettings
-from app.domain.entities import Contribuyente
+from app.core.config import (
+    ApiSettings,
+    DatabaseSettings,
+    RateLimitSettings,
+    Settings,
+    SyncSettings,
+)
+from app.domain.entities import CatalogStats, Contribuyente
+from app.domain.exceptions import DatabaseTimeoutError, DatabaseUnavailableError
 from app.main import AppContainer, create_app
 from tests.fakes import InMemoryRepo, InMemorySource
 
@@ -45,6 +53,7 @@ def call_asgi(
     query: dict[str, str] | None = None,
     json_body: dict | None = None,
     headers: dict[str, str] | None = None,
+    client: tuple[str, int] = ("127.0.0.1", 12345),
 ) -> AsgiResponse:
     """Ejecuta una petición HTTP directa contra el callable ASGI de FastAPI."""
 
@@ -67,7 +76,7 @@ def call_asgi(
             "raw_path": path.encode("ascii"),
             "query_string": query_bytes,
             "headers": req_headers,
-            "client": ("127.0.0.1", 12345),
+            "client": client,
             "server": ("testserver", 80),
         }
 
@@ -107,11 +116,27 @@ def call_asgi(
 def _build_test_app(
     initial: list[Contribuyente] | None = None,
     api_settings: ApiSettings | None = None,
+    rate_limit_settings: RateLimitSettings | None = None,
 ):
     repo = InMemoryRepo(initial)
     source = InMemorySource([initial or []])
-    sync_uc = SyncRncCatalogUseCase(repo, source)
     resolved_api = api_settings or ApiSettings()
+    resolved_rl = rate_limit_settings or RateLimitSettings(enabled=False)
+    lookup_cache: TtlLruCache[str, Contribuyente | None] = TtlLruCache(
+        maxsize=resolved_api.lookup_cache_size,
+        ttl_seconds=resolved_api.lookup_cache_ttl_seconds,
+    )
+    stats_cache: TtlLruCache[str, CatalogStats] = TtlLruCache(
+        maxsize=1, ttl_seconds=resolved_api.stats_cache_ttl_seconds
+    )
+    count_cache: TtlLruCache[str, int] = TtlLruCache(
+        maxsize=1, ttl_seconds=resolved_api.stats_cache_ttl_seconds
+    )
+    sync_uc = SyncRncCatalogUseCase(
+        repo,
+        source,
+        on_catalog_updated=(lookup_cache.clear, stats_cache.clear, count_cache.clear),
+    )
     settings = Settings(
         app_title="DGII RNC Test",
         app_version="1.1.0",
@@ -119,20 +144,21 @@ def _build_test_app(
         database=DatabaseSettings("localhost", 5432, "u", "p", "db"),
         sync=SyncSettings(enable_scheduler=False),
         api=resolved_api,
+        rate_limit=resolved_rl,
     )
     container = AppContainer(
         conn_manager=None,
         scheduler=None,
         init_uc=InitializeCatalogUseCase(repo, sync_uc),
-        get_by_rnc_uc=GetContribuyenteByRncUseCase(repo),
-        validate_rnc_uc=ValidateRncUseCase(repo),
+        get_by_rnc_uc=GetContribuyenteByRncUseCase(repo, lookup_cache=lookup_cache),
+        validate_rnc_uc=ValidateRncUseCase(repo, lookup_cache=lookup_cache),
         batch_lookup_uc=BatchLookupRncUseCase(
             repo, max_items=resolved_api.batch_max_items
         ),
         search_uc=SearchContribuyentesUseCase(repo),
-        stats_uc=GetStatsUseCase(repo, sync_uc),
+        stats_uc=GetStatsUseCase(repo, sync_uc, stats_cache=stats_cache),
         sync_uc=sync_uc,
-        health_uc=CheckHealthUseCase(repo),
+        health_uc=CheckHealthUseCase(repo, count_cache=count_cache),
     )
     return create_app(settings=settings, container=container, run_startup=False), repo
 
@@ -303,3 +329,182 @@ class TestApiEndpoints(unittest.TestCase):
         with self.app.state.container.sync_uc._local_lock:
             conflict = call_asgi(self.app, "POST", "/api/v1/sync")
             self.assertEqual(conflict.status_code, 409)
+
+    def test_security_headers_csp_and_private_cache_with_api_key(self) -> None:
+        home = call_asgi(self.app, "GET", "/", headers={"X-Request-ID": "req-123"})
+        self.assertEqual(home.headers.get("x-request-id"), "req-123")
+        self.assertEqual(home.headers.get("x-content-type-options"), "nosniff")
+        self.assertEqual(home.headers.get("x-frame-options"), "DENY")
+        csp = home.headers.get("content-security-policy", "")
+        self.assertIn("default-src 'self'", csp)
+        self.assertNotIn("'unsafe-inline'", csp)
+        self.assertIn("escapeCsvCell", home.text)
+
+        health = call_asgi(self.app, "GET", "/health")
+        self.assertEqual(health.json()["batch_max_items"], 200)
+
+        secured_app, _ = _build_test_app(
+            [self.sample],
+            api_settings=ApiSettings(api_key="read-key"),
+        )
+        secured_resp = call_asgi(
+            secured_app,
+            "GET",
+            "/api/v1/rnc/130663041",
+            headers={"X-API-Key": "read-key"},
+        )
+        self.assertEqual(secured_resp.status_code, 200)
+        self.assertIn("private", secured_resp.headers.get("cache-control", ""))
+        self.assertIn("X-API-Key", secured_resp.headers.get("vary", ""))
+
+    def test_rate_limiting_and_proxy_headers(self) -> None:
+        rl_app, _ = _build_test_app(
+            [self.sample],
+            api_settings=ApiSettings(api_key="vip-key"),
+            rate_limit_settings=RateLimitSettings(
+                enabled=True,
+                trust_proxy_headers=False,
+                lookup_per_minute=2,
+                search_per_minute=1,
+                batch_per_minute=1,
+                sync_per_minute=1,
+                api_key_multiplier=2,
+            ),
+        )
+        # Con trust_proxy_headers=False ignora X-Forwarded-For falso y agota cuota por IP real
+        r1 = call_asgi(
+            rl_app,
+            "GET",
+            "/api/v1/rnc/130663041",
+            headers={"X-API-Key": "vip-key", "X-Forwarded-For": "1.1.1.1"},
+        )
+        self.assertEqual(r1.status_code, 200)
+        self.assertEqual(r1.headers.get("x-ratelimit-limit"), "4")
+
+        for expected_status in (200, 200, 200, 429):
+            resp = call_asgi(
+                rl_app,
+                "GET",
+                "/api/v1/rnc/130663041",
+                headers={"X-API-Key": "vip-key", "X-Forwarded-For": "2.2.2.2"},
+            )
+            self.assertEqual(resp.status_code, expected_status)
+            if expected_status == 429:
+                self.assertIn("retry-after", resp.headers)
+
+        # Con trust_proxy_headers=True separa clientes según X-Forwarded-For
+        proxy_app, _ = _build_test_app(
+            [self.sample],
+            rate_limit_settings=RateLimitSettings(
+                enabled=True,
+                trust_proxy_headers=True,
+                search_per_minute=1,
+            ),
+        )
+        self.assertEqual(
+            call_asgi(
+                proxy_app,
+                "GET",
+                "/api/v1/buscar",
+                query={"query": "infra"},
+                headers={"X-Forwarded-For": "198.51.100.1"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            call_asgi(
+                proxy_app,
+                "GET",
+                "/api/v1/buscar",
+                query={"query": "infra"},
+                headers={"X-Forwarded-For": "198.51.100.1"},
+            ).status_code,
+            429,
+        )
+        self.assertEqual(
+            call_asgi(
+                proxy_app,
+                "GET",
+                "/api/v1/buscar",
+                query={"query": "infra"},
+                headers={"X-Forwarded-For": "198.51.100.2"},
+            ).status_code,
+            200,
+        )
+
+    def test_sync_loopback_protection_and_status_sanitization(self) -> None:
+        # Sin SYNC_API_KEY, solicitudes remotas o proxiadas desde fuera reciben 403
+        remote_sync = call_asgi(
+            self.app,
+            "POST",
+            "/api/v1/sync",
+            client=("203.0.113.10", 54321),
+        )
+        self.assertEqual(remote_sync.status_code, 403)
+
+        proxied_sync = call_asgi(
+            self.app,
+            "POST",
+            "/api/v1/sync",
+            headers={"X-Forwarded-For": "203.0.113.10"},
+            client=("127.0.0.1", 54321),
+        )
+        self.assertEqual(proxied_sync.status_code, 403)
+
+        # Con ALLOW_UNAUTHENTICATED_SYNC=true sí se permite
+        open_app, _ = _build_test_app(
+            [self.sample],
+            api_settings=ApiSettings(allow_unauthenticated_sync=True),
+        )
+        self.assertEqual(
+            call_asgi(
+                open_app, "POST", "/api/v1/sync", client=("203.0.113.10", 54321)
+            ).status_code,
+            202,
+        )
+
+        # Sanitización de /sync/status para rutas internas y errores
+        run_id = self.repo.record_sync_start("file:///etc/secret/padron.zip")
+        self.repo.record_sync_finish(
+            run_id=run_id,
+            status="failed",
+            processed=0,
+            changed=0,
+            elapsed_seconds=0.1,
+            source="file:///etc/secret/padron.zip",
+            error_message="psycopg2 internal path error",
+        )
+        public_status = call_asgi(
+            self.app,
+            "GET",
+            "/api/v1/sync/status",
+            client=("203.0.113.10", 54321),
+        )
+        self.assertEqual(public_status.status_code, 200)
+        run_data = public_status.json()["run"]
+        self.assertEqual(run_data["source"], "file://<local>")
+        self.assertNotIn("psycopg2", run_data["error_message"])
+
+        local_status = call_asgi(self.app, "GET", "/api/v1/sync/status")
+        self.assertEqual(
+            local_status.json()["run"]["source"], "file:///etc/secret/padron.zip"
+        )
+        self.assertIn("psycopg2", local_status.json()["run"]["error_message"])
+
+    def test_database_error_and_unexpected_exception_handlers(self) -> None:
+        self.repo.fail_next_error = DatabaseTimeoutError()
+        timeout_resp = call_asgi(
+            self.app, "GET", "/api/v1/buscar", query={"query": "infra"}
+        )
+        self.assertEqual(timeout_resp.status_code, 504)
+
+        self.repo.fail_next_error = DatabaseUnavailableError()
+        busy_resp = call_asgi(self.app, "GET", "/api/v1/rnc/130663041")
+        self.assertEqual(busy_resp.status_code, 503)
+        self.assertEqual(busy_resp.headers.get("retry-after"), "5")
+
+        self.repo.fail_next_error = RuntimeError("sensitive internal trace")
+        crash_resp = call_asgi(self.app, "GET", "/api/v1/rnc/130663041")
+        self.assertEqual(crash_resp.status_code, 500)
+        self.assertEqual(crash_resp.json()["detail"], "Error interno del servidor.")
+        self.assertNotIn("sensitive", crash_resp.text)

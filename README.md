@@ -89,6 +89,7 @@ python -m app.cli sync --file /ruta/RNC_CONTRIBUYENTES.zip
 | `DB_USER` | Usuario de PostgreSQL | `dgii_user` |
 | `DB_PASSWORD` | Contraseña de PostgreSQL | `dgii_password` |
 | `DB_NAME` | Nombre de la base de datos | `dgii_rnc` |
+| `DB_POOL_TIMEOUT_SECONDS` | Espera máxima por una conexión libre del pool (seg) | `5` |
 | `DB_STATEMENT_TIMEOUT_MS` | Timeout para búsquedas de texto (ms) | `5000` |
 | `API_PORT` | Puerto HTTP expuesto por la API | `8000` |
 | `DGII_RNC_URL` | URL del ZIP oficial de la DGII | `https://dgii.gov.do/app/WebApps/Consultas/RNC/RNC_CONTRIBUYENTES.zip` |
@@ -96,10 +97,20 @@ python -m app.cli sync --file /ruta/RNC_CONTRIBUYENTES.zip
 | `SYNC_HOUR` / `SYNC_MINUTE` | Horario diario de sincronización automática | `3` / `0` |
 | `ENABLE_SCHEDULER` | Habilita cronjob en memoria (`false` si usas cron externo) | `true` |
 | `ENABLE_MANUAL_SYNC` | Habilita `POST /api/v1/sync` vía HTTP | `true` |
+| `ALLOW_UNAUTHENTICATED_SYNC` | Permite `POST /api/v1/sync` remoto sin `SYNC_API_KEY` | `false` |
 | `CORS_ORIGINS` | Orígenes permitidos separados por coma | `*` |
 | `API_KEY` | Clave opcional (`X-API-Key` / Bearer) para consultas | _(vacío)_ |
 | `SYNC_API_KEY` | Clave opcional exclusiva para `POST /api/v1/sync` | _(vacío)_ |
 | `BATCH_MAX_ITEMS` | Máximo de RNCs por llamada en `/rnc/batch` | `200` |
+| `STATS_CACHE_TTL_SECONDS` | Caché en memoria (seg) para `/stats` y conteo de `/health` | `300` |
+| `LOOKUP_CACHE_SIZE` / `LOOKUP_CACHE_TTL_SECONDS` | Caché LRU en memoria para consultas exactas por RNC | `2048` / `300` |
+| `RATE_LIMIT_ENABLED` | Activa limitación de tasa por IP (`429 Too Many Requests`) | `true` |
+| `TRUST_PROXY_HEADERS` | Lee IP real desde `X-Forwarded-For`/`X-Real-IP` detrás de proxy | `false` |
+| `RATE_LIMIT_LOOKUP_PER_MINUTE` | Consultas exactas/validar/stats por minuto por IP | `120` |
+| `RATE_LIMIT_SEARCH_PER_MINUTE` | Búsquedas por razón social por minuto por IP | `30` |
+| `RATE_LIMIT_BATCH_PER_MINUTE` | Consultas en lote por minuto por IP | `15` |
+| `RATE_LIMIT_SYNC_PER_MINUTE` | Solicitudes de sincronización por minuto por IP | `5` |
+| `RATE_LIMIT_API_KEY_MULTIPLIER` | Multiplicador de cuota cuando se presenta una API key válida | `5` |
 | `TZ` | Zona horaria del contenedor | `America/Santo_Domingo` |
 
 ## Endpoints principales (`/api/v1`)

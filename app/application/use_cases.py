@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 
+from app.application.cache import TtlLruCache
 from app.domain.entities import (
     BatchLookupResult,
     CatalogStats,
@@ -36,8 +39,13 @@ def _is_valid_lookup_rnc(normalized: str) -> bool:
 class GetContribuyenteByRncUseCase:
     """Caso de uso para consultar un contribuyente exacto por RNC o Cédula."""
 
-    def __init__(self, repository: ContribuyenteRepository) -> None:
+    def __init__(
+        self,
+        repository: ContribuyenteRepository,
+        lookup_cache: TtlLruCache[str, Contribuyente | None] | None = None,
+    ) -> None:
         self._repository = repository
+        self._lookup_cache = lookup_cache
 
     def execute(self, raw_rnc: str) -> Contribuyente:
         normalized = normalize_rnc(raw_rnc)
@@ -46,7 +54,16 @@ class GetContribuyenteByRncUseCase:
                 "El RNC o Cédula debe contener únicamente entre 5 y 20 dígitos."
             )
 
-        contribuyente = self._repository.get_by_rnc(normalized)
+        contribuyente: Contribuyente | None = None
+        hit = False
+        if self._lookup_cache is not None:
+            hit, contribuyente = self._lookup_cache.get_entry(normalized)
+
+        if not hit:
+            contribuyente = self._repository.get_by_rnc(normalized)
+            if self._lookup_cache is not None:
+                self._lookup_cache.set(normalized, contribuyente)
+
         if contribuyente is None:
             raise ContribuyenteNotFoundError(normalized)
 
@@ -56,8 +73,13 @@ class GetContribuyenteByRncUseCase:
 class ValidateRncUseCase:
     """Caso de uso para validar formato/dígito verificador y presencia en padrón."""
 
-    def __init__(self, repository: ContribuyenteRepository) -> None:
+    def __init__(
+        self,
+        repository: ContribuyenteRepository,
+        lookup_cache: TtlLruCache[str, Contribuyente | None] | None = None,
+    ) -> None:
         self._repository = repository
+        self._lookup_cache = lookup_cache
 
     def execute(self, raw_rnc: str) -> tuple[RncValidation, Contribuyente | None]:
         validation = validate_rnc_format(raw_rnc)
@@ -66,7 +88,13 @@ class ValidateRncUseCase:
 
         contribuyente: Contribuyente | None = None
         if _is_valid_lookup_rnc(validation.rnc):
-            contribuyente = self._repository.get_by_rnc(validation.rnc)
+            hit = False
+            if self._lookup_cache is not None:
+                hit, contribuyente = self._lookup_cache.get_entry(validation.rnc)
+            if not hit:
+                contribuyente = self._repository.get_by_rnc(validation.rnc)
+                if self._lookup_cache is not None:
+                    self._lookup_cache.set(validation.rnc, contribuyente)
 
         return validation, contribuyente
 
@@ -156,15 +184,22 @@ class SyncRncCatalogUseCase:
         repository: ContribuyenteRepository,
         source: DgiiSourcePort,
         batch_size: int = 10_000,
+        on_catalog_updated: Sequence[Callable[[], None]] = (),
     ) -> None:
         self._repository = repository
         self._source = source
         self._batch_size = batch_size
         self._local_lock = threading.Lock()
+        self._on_catalog_updated = tuple(on_catalog_updated)
 
     def is_running(self) -> bool:
-        """Indica si existe una sincronización en progreso en este proceso."""
-        return self._local_lock.locked()
+        """Indica si existe una sincronización en progreso en este proceso u otro worker."""
+        if self._local_lock.locked():
+            return True
+        try:
+            return self._repository.is_sync_locked()
+        except Exception:
+            return False
 
     def get_latest_run(self) -> SyncRun | None:
         """Obtiene la última ejecución de sincronización registrada."""
@@ -248,6 +283,22 @@ class SyncRncCatalogUseCase:
                             total_changed,
                         )
 
+                if total_processed == 0:
+                    raise ValueError(
+                        "El archivo descargado de la DGII no contiene registros válidos; "
+                        "se abortó para proteger el catálogo actual."
+                    )
+
+                if total_changed > 0:
+                    try:
+                        self._repository.analyze_catalog()
+                    except Exception:
+                        logger.warning(
+                            "No se pudo ejecutar ANALYZE tras la sincronización.",
+                            exc_info=True,
+                        )
+                    self._invalidate_caches()
+
                 elapsed = round(time.monotonic() - start, 2)
                 self._safe_finish_record(
                     run_id=run_id,
@@ -314,6 +365,13 @@ class SyncRncCatalogUseCase:
         except Exception:
             logger.exception("No se pudo registrar el resultado de la sincronización.")
 
+    def _invalidate_caches(self) -> None:
+        for callback in self._on_catalog_updated:
+            try:
+                callback()
+            except Exception:
+                logger.warning("Error invalidando caché tras sincronización.", exc_info=True)
+
 
 class InitializeCatalogUseCase:
     """Caso de uso ejecutado al arrancar la aplicación."""
@@ -343,8 +401,14 @@ class InitializeCatalogUseCase:
             self._initializing = False
 
     def execute(self, run_async: bool = True) -> None:
-        """Inicializa el esquema y lanza carga inicial si la tabla está vacía."""
+        """Inicializa el esquema, limpia estados huérfanos y carga si la tabla está vacía."""
         self._repository.init_schema()
+        cleaned = self._repository.cleanup_stale_sync_runs()
+        if cleaned > 0:
+            logger.warning(
+                "Se marcaron %d sincronizaciones huérfanas previas como interrumpidas.",
+                cleaned,
+            )
         total = self._repository.count()
         logger.info("Registros actuales en base de datos: %d", total)
 
@@ -372,22 +436,64 @@ class GetStatsUseCase:
         self,
         repository: ContribuyenteRepository,
         sync_use_case: SyncRncCatalogUseCase,
+        stats_cache: TtlLruCache[str, CatalogStats] | None = None,
     ) -> None:
         self._repository = repository
         self._sync_use_case = sync_use_case
+        self._stats_cache = stats_cache
 
     def execute(self) -> CatalogStats:
-        return self._repository.get_stats(is_syncing=self._sync_use_case.is_running())
+        is_syncing = self._sync_use_case.is_running()
+        if self._stats_cache is not None:
+            hit, cached = self._stats_cache.get_entry("stats")
+            if hit and cached is not None:
+                return replace(cached, is_syncing=is_syncing)
+
+        stats = self._repository.get_stats(is_syncing=is_syncing)
+        if self._stats_cache is not None:
+            self._stats_cache.set("stats", stats)
+        return stats
 
 
 class CheckHealthUseCase:
     """Caso de uso para verificar el estado de la persistencia y el catálogo."""
 
-    def __init__(self, repository: ContribuyenteRepository) -> None:
+    def __init__(
+        self,
+        repository: ContribuyenteRepository,
+        count_cache: TtlLruCache[str, int] | None = None,
+    ) -> None:
         self._repository = repository
+        self._count_cache = count_cache
 
     def execute(self) -> bool:
         return self._repository.is_healthy()
 
+    def has_records(self) -> bool:
+        return self._repository.has_records()
+
     def count_records(self) -> int:
-        return self._repository.count()
+        if self._count_cache is not None:
+            hit, cached = self._count_cache.get_entry("count")
+            if hit and cached is not None:
+                return cached
+        total = self._repository.count()
+        if self._count_cache is not None:
+            self._count_cache.set("count", total)
+        return total
+
+    def get_health_snapshot(self) -> tuple[bool, bool, int]:
+        """Retorna (healthy, catalog_ready, total_contribuyentes) minimizando escaneos."""
+        if not self._repository.is_healthy():
+            return False, False, 0
+
+        catalog_ready = self._repository.has_records()
+        if self._count_cache is not None:
+            hit, cached = self._count_cache.get_entry("count")
+            if hit and cached is not None and (cached > 0) == catalog_ready:
+                return True, catalog_ready, cached
+
+        total = self._repository.count() if catalog_ready else 0
+        if self._count_cache is not None:
+            self._count_cache.set("count", total)
+        return True, catalog_ready, total

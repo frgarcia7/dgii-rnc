@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import os
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from psycopg2 import OperationalError
+from psycopg2.errors import QueryCanceled
+
+from app.application.cache import TtlLruCache
 from app.application.use_cases import (
     BatchLookupRncUseCase,
     CheckHealthUseCase,
@@ -16,7 +21,7 @@ from app.application.use_cases import (
     SyncRncCatalogUseCase,
     ValidateRncUseCase,
 )
-from app.core.config import Settings
+from app.core.config import DatabaseSettings, Settings
 from app.domain.entities import (
     Contribuyente,
     format_rnc,
@@ -24,7 +29,13 @@ from app.domain.entities import (
     is_valid_rnc_check_digit,
     validate_rnc_format,
 )
-from app.domain.exceptions import ContribuyenteNotFoundError, InvalidInputError
+from app.domain.exceptions import (
+    ContribuyenteNotFoundError,
+    DatabaseTimeoutError,
+    DatabaseUnavailableError,
+    InvalidInputError,
+)
+from app.infrastructure.db.connection import PostgresConnectionManager
 from tests.fakes import InMemoryRepo, InMemorySource
 
 
@@ -221,6 +232,10 @@ class TestUseCases(unittest.TestCase):
                 "ENABLE_SCHEDULER": "false",
                 "CORS_ORIGINS": "http://localhost:3000, https://erp.local",
                 "API_KEY": "secret-key",
+                "DB_POOL_TIMEOUT_SECONDS": "2.5",
+                "RATE_LIMIT_SEARCH_PER_MINUTE": "45",
+                "TRUST_PROXY_HEADERS": "true",
+                "ALLOW_UNAUTHENTICATED_SYNC": "true",
             },
         ):
             cfg = Settings.from_env()
@@ -229,3 +244,139 @@ class TestUseCases(unittest.TestCase):
                 cfg.api.cors_origins, ("http://localhost:3000", "https://erp.local")
             )
             self.assertEqual(cfg.api.api_key, "secret-key")
+            self.assertEqual(cfg.database.pool_timeout_seconds, 2.5)
+            self.assertEqual(cfg.rate_limit.search_per_minute, 45)
+            self.assertTrue(cfg.rate_limit.trust_proxy_headers)
+            self.assertTrue(cfg.api.allow_unauthenticated_sync)
+
+    def test_caches_reduce_db_reads_and_invalidate_on_sync(self) -> None:
+        repo = InMemoryRepo([self.sample])
+        lookup_cache: TtlLruCache[str, Contribuyente | None] = TtlLruCache(
+            maxsize=10, ttl_seconds=60
+        )
+        stats_cache = TtlLruCache(maxsize=1, ttl_seconds=60)
+        count_cache = TtlLruCache(maxsize=1, ttl_seconds=60)
+
+        get_uc = GetContribuyenteByRncUseCase(repo, lookup_cache=lookup_cache)
+        val_uc = ValidateRncUseCase(repo, lookup_cache=lookup_cache)
+        sync_uc = SyncRncCatalogUseCase(
+            repo,
+            InMemorySource([[self.sample, self.second]]),
+            on_catalog_updated=(lookup_cache.clear, stats_cache.clear, count_cache.clear),
+        )
+        stats_uc = GetStatsUseCase(repo, sync_uc, stats_cache=stats_cache)
+        health_uc = CheckHealthUseCase(repo, count_cache=count_cache)
+
+        # Lookup cache: 1 lectura DB para repetidos + negative hit para inexistente
+        self.assertEqual(get_uc.execute("130663041").razon_social, self.sample.razon_social)
+        _, validated_entity = val_uc.execute("130-66304-1")
+        assert validated_entity is not None
+        self.assertEqual(validated_entity.rnc, "130663041")
+        self.assertEqual(repo.get_by_rnc_calls, 1)
+
+        with self.assertRaises(ContribuyenteNotFoundError):
+            get_uc.execute("999999999")
+        with self.assertRaises(ContribuyenteNotFoundError):
+            get_uc.execute("999999999")
+        self.assertEqual(repo.get_by_rnc_calls, 2)
+
+        # Stats y health snapshot cacheados
+        stats_uc.execute()
+        stats_uc.execute()
+        self.assertEqual(repo.stats_calls, 1)
+
+        health_uc.get_health_snapshot()
+        health_uc.get_health_snapshot()
+        self.assertEqual(repo.count_calls, 1)
+
+        # Sincronización con cambios limpia cachés y llama analyze_catalog
+        sync_uc.execute(force=True)
+        self.assertEqual(repo.analyze_calls, 1)
+
+        self.assertEqual(get_uc.execute("101010101").rnc, "101010101")
+        self.assertEqual(repo.get_by_rnc_calls, 3)
+        stats_uc.execute()
+        self.assertEqual(repo.stats_calls, 2)
+        _, ready, total = health_uc.get_health_snapshot()
+        self.assertTrue(ready)
+        self.assertEqual(total, 2)
+        self.assertEqual(repo.count_calls, 2)
+
+    def test_ttl_lru_cache_eviction_and_expiration(self) -> None:
+        cache: TtlLruCache[str, int] = TtlLruCache(maxsize=2, ttl_seconds=1)
+        cache.set("a", 1)
+        cache.set("b", 2)
+        self.assertEqual(cache.get_entry("a"), (True, 1))
+        cache.set("c", 3)
+        self.assertEqual(cache.get_entry("b"), (False, None))
+        self.assertEqual(cache.get_entry("a"), (True, 1))
+
+        time.sleep(1.05)
+        self.assertEqual(cache.get_entry("a"), (False, None))
+
+        disabled: TtlLruCache[str, int] = TtlLruCache(maxsize=0, ttl_seconds=60)
+        disabled.set("x", 10)
+        self.assertEqual(disabled.get_entry("x"), (False, None))
+
+    def test_sync_rejects_empty_source_and_startup_cleans_stale_runs(self) -> None:
+        repo = InMemoryRepo([self.sample])
+        stale_id = repo.record_sync_start("dgii")
+        assert stale_id is not None
+
+        empty_sync_uc = SyncRncCatalogUseCase(repo, InMemorySource([[]]))
+        init_uc = InitializeCatalogUseCase(repo, empty_sync_uc)
+        init_uc.execute(run_async=False)
+
+        latest_after_init = empty_sync_uc.get_latest_run()
+        assert latest_after_init is not None
+        self.assertEqual(latest_after_init.status, "interrupted")
+
+        with self.assertRaises(ValueError):
+            empty_sync_uc.execute()
+        latest_after_empty = empty_sync_uc.get_latest_run()
+        assert latest_after_empty is not None
+        self.assertEqual(latest_after_empty.status, "failed")
+        self.assertIsNone(repo.get_last_successful_sync())
+
+
+class TestConnectionPoolResilience(unittest.TestCase):
+    def test_pool_timeout_raises_database_unavailable(self) -> None:
+        cfg = DatabaseSettings(
+            "localhost", 5432, "u", "p", "db", pool_max=1, pool_timeout_seconds=0.1
+        )
+        mgr = PostgresConnectionManager(cfg)
+
+        fake_conn = MagicMock()
+        fake_conn.closed = False
+        fake_pool = MagicMock()
+        fake_pool.getconn.return_value = fake_conn
+        mgr._pool = fake_pool
+
+        with mgr.connection():
+            with self.assertRaises(DatabaseUnavailableError):
+                with mgr.connection():
+                    pass
+
+    def test_query_canceled_and_operational_error_translation(self) -> None:
+        cfg = DatabaseSettings(
+            "localhost", 5432, "u", "p", "db", pool_max=2, pool_timeout_seconds=1.0
+        )
+        mgr = PostgresConnectionManager(cfg)
+
+        fake_conn = MagicMock()
+        fake_conn.closed = False
+        fake_pool = MagicMock()
+        fake_pool.getconn.return_value = fake_conn
+        mgr._pool = fake_pool
+
+        with self.assertRaises(DatabaseTimeoutError):
+            with mgr.connection():
+                raise QueryCanceled("canceling statement due to statement timeout")
+        fake_conn.rollback.assert_called_once()
+        fake_pool.putconn.assert_called_with(fake_conn, close=False)
+
+        fake_pool.reset_mock()
+        with self.assertRaises(DatabaseUnavailableError):
+            with mgr.connection():
+                raise OperationalError("connection closed")
+        fake_pool.putconn.assert_called_with(fake_conn, close=True)

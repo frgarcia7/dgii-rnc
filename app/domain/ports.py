@@ -25,6 +25,10 @@ class ContribuyenteRepository(Protocol):
         """Retorna el total de contribuyentes almacenados."""
         ...
 
+    def has_records(self) -> bool:
+        """Verifica rápidamente si existe al menos un contribuyente almacenado."""
+        ...
+
     def get_by_rnc(self, rnc: str) -> Contribuyente | None:
         """Obtiene un contribuyente por su RNC exacto."""
         ...
@@ -51,6 +55,18 @@ class ContribuyenteRepository(Protocol):
 
     def sync_lock(self) -> AbstractContextManager[bool]:
         """Intenta adquirir un bloqueo exclusivo entre procesos para sincronizar."""
+        ...
+
+    def is_sync_locked(self) -> bool:
+        """Indica si algún proceso mantiene actualmente el bloqueo de sincronización."""
+        ...
+
+    def cleanup_stale_sync_runs(self) -> int:
+        """Marca como interrumpidas las sincronizaciones 'running' huérfanas sin lock."""
+        ...
+
+    def analyze_catalog(self) -> None:
+        """Actualiza estadísticas del planificador de consultas tras cambios masivos."""
         ...
 
     def get_last_successful_sync(self) -> SyncRun | None:

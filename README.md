@@ -41,7 +41,7 @@ app/
     ├── routers/                 # Endpoints REST (/api/v1/*, /api/*, /health) y UI web (/)
     ├── static/index.html        # Buscador web local (sin dependencias CDN externas)
     ├── schemas/                 # DTOs Pydantic v2 para Swagger UI
-    ├── dependencies.py          # Inyección de casos de uso y API keys opcionales
+    ├── dependencies.py          # Inyección de casos de uso, rate limit y control sync local
     └── exception_handlers.py    # Mapeo de excepciones de dominio a códigos HTTP
 ```
 
@@ -97,10 +97,8 @@ python -m app.cli sync --file /ruta/RNC_CONTRIBUYENTES.zip
 | `SYNC_HOUR` / `SYNC_MINUTE` | Horario diario de sincronización automática | `3` / `0` |
 | `ENABLE_SCHEDULER` | Habilita cronjob en memoria (`false` si usas cron externo) | `true` |
 | `ENABLE_MANUAL_SYNC` | Habilita `POST /api/v1/sync` vía HTTP | `true` |
-| `ALLOW_UNAUTHENTICATED_SYNC` | Permite `POST /api/v1/sync` remoto sin `SYNC_API_KEY` | `false` |
+| `ALLOW_REMOTE_SYNC` | Permite `POST /api/v1/sync` desde IPs no locales (proteger en proxy/gateway) | `false` |
 | `CORS_ORIGINS` | Orígenes permitidos separados por coma | `*` |
-| `API_KEY` | Clave opcional (`X-API-Key` / Bearer) para consultas | _(vacío)_ |
-| `SYNC_API_KEY` | Clave opcional exclusiva para `POST /api/v1/sync` | _(vacío)_ |
 | `BATCH_MAX_ITEMS` | Máximo de RNCs por llamada en `/rnc/batch` | `200` |
 | `STATS_CACHE_TTL_SECONDS` | Caché en memoria (seg) para `/stats` y conteo de `/health` | `300` |
 | `LOOKUP_CACHE_SIZE` / `LOOKUP_CACHE_TTL_SECONDS` | Caché LRU en memoria para consultas exactas por RNC | `2048` / `300` |
@@ -110,7 +108,6 @@ python -m app.cli sync --file /ruta/RNC_CONTRIBUYENTES.zip
 | `RATE_LIMIT_SEARCH_PER_MINUTE` | Búsquedas por razón social por minuto por IP | `30` |
 | `RATE_LIMIT_BATCH_PER_MINUTE` | Consultas en lote por minuto por IP | `15` |
 | `RATE_LIMIT_SYNC_PER_MINUTE` | Solicitudes de sincronización por minuto por IP | `5` |
-| `RATE_LIMIT_API_KEY_MULTIPLIER` | Multiplicador de cuota cuando se presenta una API key válida | `5` |
 | `TZ` | Zona horaria del contenedor | `America/Santo_Domingo` |
 
 ## Endpoints principales (`/api/v1`)

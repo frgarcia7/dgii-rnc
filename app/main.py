@@ -145,19 +145,14 @@ def _log_startup_security_notices(settings: Settings) -> None:
         logger.warning(
             "DB_PASSWORD usa el valor por defecto; cámbialo antes de exponer este servicio."
         )
-    if (
-        settings.api.enable_manual_sync
-        and not settings.api.sync_api_key
-        and not settings.api.api_key
-    ):
-        if settings.api.allow_unauthenticated_sync:
+    if settings.api.enable_manual_sync:
+        if settings.api.allow_remote_sync:
             logger.warning(
-                "ALLOW_UNAUTHENTICATED_SYNC=true sin SYNC_API_KEY: "
-                "cualquier cliente puede disparar POST /api/v1/sync."
+                "ALLOW_REMOTE_SYNC=true: protege POST /api/v1/sync en tu proxy o gateway."
             )
         else:
             logger.info(
-                "SYNC_API_KEY no definida: POST /api/v1/sync restringido a solicitudes locales."
+                "POST /api/v1/sync restringido a solicitudes locales (ALLOW_REMOTE_SYNC=false)."
             )
 
 

@@ -344,7 +344,6 @@
       <nav class="nav-links">
         <a href="/docs">Swagger UI</a>
         <a href="/redoc">ReDoc</a>
-        <button type="button" id="apiKeyBtn" title="Configurar API Key si la instancia la requiere">API Key</button>
       </nav>
     </div>
   </header>
@@ -421,14 +420,8 @@
     let maxBatchItems = 200;
     let lastBatchData = null;
 
-    function getApiHeaders() {
-      const key = sessionStorage.getItem("dgii_api_key");
-      return key ? { "X-API-Key": key } : {};
-    }
-
     async function apiFetch(path, options = {}) {
-      const headers = { ...(options.headers || {}), ...getApiHeaders() };
-      const resp = await fetch(`${API_BASE}${path}`, { ...options, headers });
+      const resp = await fetch(`${API_BASE}${path}`, options);
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
         const retryAfter = resp.headers.get("Retry-After");
@@ -791,9 +784,9 @@
           syncText.textContent = `Último sync (${stats.last_sync.status}): ${dt ? new Date(dt).toLocaleString() : ""}`;
         }
       } catch {
-        badge.className = "badge badge-info";
-        badge.textContent = "Auth requerida / Conectado";
-        statsText.textContent = "Configura tu API Key si el servidor la solicita.";
+        badge.className = "badge badge-bad";
+        badge.textContent = "Sin conexión";
+        statsText.textContent = "No se pudo consultar el estado del servicio.";
       }
     }
 
@@ -821,14 +814,6 @@
       document.getElementById("estatusFilter").value = "";
       document.getElementById("regimenFilter").value = "";
       document.getElementById("singleOutput").replaceChildren();
-    });
-    document.getElementById("apiKeyBtn").addEventListener("click", () => {
-      const current = sessionStorage.getItem("dgii_api_key") || "";
-      const next = prompt("Ingresa X-API-Key (deja vacío para limpiar):", current);
-      if (next === null) return;
-      if (next.trim()) sessionStorage.setItem("dgii_api_key", next.trim());
-      else sessionStorage.removeItem("dgii_api_key");
-      loadStatus();
     });
 
     loadStatus();

@@ -24,7 +24,6 @@ from app.presentation.dependencies import (
     rate_limit_batch,
     rate_limit_lookup,
     rate_limit_search,
-    require_api_key,
 )
 from app.presentation.schemas.contribuyente import (
     BatchLookupRequest,
@@ -36,10 +35,7 @@ from app.presentation.schemas.contribuyente import (
     StatsResponse,
 )
 
-router = APIRouter(
-    tags=["Contribuyentes"],
-    dependencies=[Depends(require_api_key)],
-)
+router = APIRouter(tags=["Contribuyentes"])
 
 _COMMON_RATE_AND_DB_RESPONSES: dict[int | str, dict[str, Any]] = {
     status.HTTP_429_TOO_MANY_REQUESTS: {
@@ -61,12 +57,7 @@ def _apply_cache_headers(
         if max_age_seconds is None
         else max_age_seconds
     )
-    if ttl <= 0:
-        return
-    if settings.api.api_key:
-        response.headers["Cache-Control"] = f"private, max-age={ttl}"
-        response.headers["Vary"] = "X-API-Key, Authorization"
-    else:
+    if ttl > 0:
         response.headers["Cache-Control"] = f"public, max-age={ttl}"
 
 

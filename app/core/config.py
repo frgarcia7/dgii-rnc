@@ -101,13 +101,11 @@ class SyncSettings:
 
 @dataclass(frozen=True, slots=True)
 class ApiSettings:
-    """Parámetros HTTP, seguridad opcional, caché y límites operativos."""
+    """Parámetros HTTP, caché y límites operativos."""
 
     cors_origins: tuple[str, ...] = ("*",)
-    api_key: str | None = None
-    sync_api_key: str | None = None
     enable_manual_sync: bool = True
-    allow_unauthenticated_sync: bool = False
+    allow_remote_sync: bool = False
     batch_max_items: int = 200
     cache_max_age_seconds: int = 300
     stats_cache_ttl_seconds: int = 300
@@ -125,7 +123,6 @@ class RateLimitSettings:
     search_per_minute: int = 30
     batch_per_minute: int = 15
     sync_per_minute: int = 5
-    api_key_multiplier: int = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,12 +179,8 @@ class Settings:
             ),
             api=ApiSettings(
                 cors_origins=_parse_csv_list("CORS_ORIGINS", ("*",)),
-                api_key=_optional_str("API_KEY"),
-                sync_api_key=_optional_str("SYNC_API_KEY"),
                 enable_manual_sync=_parse_bool("ENABLE_MANUAL_SYNC", True),
-                allow_unauthenticated_sync=_parse_bool(
-                    "ALLOW_UNAUTHENTICATED_SYNC", False
-                ),
+                allow_remote_sync=_parse_bool("ALLOW_REMOTE_SYNC", False),
                 batch_max_items=_parse_int("BATCH_MAX_ITEMS", 200, 1, 1000),
                 cache_max_age_seconds=_parse_int("CACHE_MAX_AGE_SECONDS", 300, 0, 86400),
                 stats_cache_ttl_seconds=_parse_int(
@@ -212,9 +205,6 @@ class Settings:
                 ),
                 sync_per_minute=_parse_int(
                     "RATE_LIMIT_SYNC_PER_MINUTE", 5, 1, 1000
-                ),
-                api_key_multiplier=_parse_int(
-                    "RATE_LIMIT_API_KEY_MULTIPLIER", 5, 1, 100
                 ),
             ),
         )

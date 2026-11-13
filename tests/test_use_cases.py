@@ -231,11 +231,10 @@ class TestUseCases(unittest.TestCase):
             {
                 "ENABLE_SCHEDULER": "false",
                 "CORS_ORIGINS": "http://localhost:3000, https://erp.local",
-                "API_KEY": "secret-key",
                 "DB_POOL_TIMEOUT_SECONDS": "2.5",
                 "RATE_LIMIT_SEARCH_PER_MINUTE": "45",
                 "TRUST_PROXY_HEADERS": "true",
-                "ALLOW_UNAUTHENTICATED_SYNC": "true",
+                "ALLOW_REMOTE_SYNC": "true",
             },
         ):
             cfg = Settings.from_env()
@@ -243,11 +242,10 @@ class TestUseCases(unittest.TestCase):
             self.assertEqual(
                 cfg.api.cors_origins, ("http://localhost:3000", "https://erp.local")
             )
-            self.assertEqual(cfg.api.api_key, "secret-key")
             self.assertEqual(cfg.database.pool_timeout_seconds, 2.5)
             self.assertEqual(cfg.rate_limit.search_per_minute, 45)
             self.assertTrue(cfg.rate_limit.trust_proxy_headers)
-            self.assertTrue(cfg.api.allow_unauthenticated_sync)
+            self.assertTrue(cfg.api.allow_remote_sync)
 
     def test_caches_reduce_db_reads_and_invalidate_on_sync(self) -> None:
         repo = InMemoryRepo([self.sample])

@@ -278,42 +278,6 @@ class TestApiEndpoints(unittest.TestCase):
             cors_preflight.headers.get("access-control-allow-origin"), "*"
         )
 
-        # Instancia con API_KEY y SYNC_API_KEY activas
-        secured_app, _ = _build_test_app(
-            [self.sample],
-            api_settings=ApiSettings(api_key="read-key", sync_api_key="admin-key"),
-        )
-        self.assertEqual(
-            call_asgi(secured_app, "GET", "/api/v1/rnc/130663041").status_code, 401
-        )
-        self.assertEqual(
-            call_asgi(
-                secured_app,
-                "GET",
-                "/api/v1/rnc/130663041",
-                headers={"X-API-Key": "read-key"},
-            ).status_code,
-            200,
-        )
-        self.assertEqual(
-            call_asgi(
-                secured_app,
-                "POST",
-                "/api/v1/sync",
-                headers={"X-API-Key": "read-key"},
-            ).status_code,
-            401,
-        )
-        self.assertEqual(
-            call_asgi(
-                secured_app,
-                "POST",
-                "/api/v1/sync",
-                headers={"Authorization": "Bearer admin-key"},
-            ).status_code,
-            202,
-        )
-
         disabled_sync_app, _ = _build_test_app(
             [self.sample], api_settings=ApiSettings(enable_manual_sync=False)
         )
@@ -330,7 +294,7 @@ class TestApiEndpoints(unittest.TestCase):
             conflict = call_asgi(self.app, "POST", "/api/v1/sync")
             self.assertEqual(conflict.status_code, 409)
 
-    def test_security_headers_csp_and_private_cache_with_api_key(self) -> None:
+    def test_security_headers_csp_and_clean_openapi_schema(self) -> None:
         home = call_asgi(self.app, "GET", "/", headers={"X-Request-ID": "req-123"})
         self.assertEqual(home.headers.get("x-request-id"), "req-123")
         self.assertEqual(home.headers.get("x-content-type-options"), "nosniff")
@@ -339,28 +303,22 @@ class TestApiEndpoints(unittest.TestCase):
         self.assertIn("default-src 'self'", csp)
         self.assertNotIn("'unsafe-inline'", csp)
         self.assertIn("escapeCsvCell", home.text)
+        self.assertNotIn("X-API-Key", home.text)
 
         health = call_asgi(self.app, "GET", "/health")
         self.assertEqual(health.json()["batch_max_items"], 200)
 
-        secured_app, _ = _build_test_app(
-            [self.sample],
-            api_settings=ApiSettings(api_key="read-key"),
-        )
-        secured_resp = call_asgi(
-            secured_app,
-            "GET",
-            "/api/v1/rnc/130663041",
-            headers={"X-API-Key": "read-key"},
-        )
-        self.assertEqual(secured_resp.status_code, 200)
-        self.assertIn("private", secured_resp.headers.get("cache-control", ""))
-        self.assertIn("X-API-Key", secured_resp.headers.get("vary", ""))
+        # El esquema OpenAPI no debe exponer headers de auth (X-API-Key / Authorization)
+        openapi = call_asgi(self.app, "GET", "/openapi.json").json()
+        for path_item in openapi["paths"].values():
+            for op in path_item.values():
+                param_names = {p.get("name") for p in op.get("parameters", [])}
+                self.assertNotIn("X-API-Key", param_names)
+                self.assertNotIn("Authorization", param_names)
 
     def test_rate_limiting_and_proxy_headers(self) -> None:
         rl_app, _ = _build_test_app(
             [self.sample],
-            api_settings=ApiSettings(api_key="vip-key"),
             rate_limit_settings=RateLimitSettings(
                 enabled=True,
                 trust_proxy_headers=False,
@@ -368,7 +326,6 @@ class TestApiEndpoints(unittest.TestCase):
                 search_per_minute=1,
                 batch_per_minute=1,
                 sync_per_minute=1,
-                api_key_multiplier=2,
             ),
         )
         # Con trust_proxy_headers=False ignora X-Forwarded-For falso y agota cuota por IP real
@@ -376,21 +333,27 @@ class TestApiEndpoints(unittest.TestCase):
             rl_app,
             "GET",
             "/api/v1/rnc/130663041",
-            headers={"X-API-Key": "vip-key", "X-Forwarded-For": "1.1.1.1"},
+            headers={"X-Forwarded-For": "1.1.1.1"},
         )
         self.assertEqual(r1.status_code, 200)
-        self.assertEqual(r1.headers.get("x-ratelimit-limit"), "4")
+        self.assertEqual(r1.headers.get("x-ratelimit-limit"), "2")
 
-        for expected_status in (200, 200, 200, 429):
-            resp = call_asgi(
-                rl_app,
-                "GET",
-                "/api/v1/rnc/130663041",
-                headers={"X-API-Key": "vip-key", "X-Forwarded-For": "2.2.2.2"},
-            )
-            self.assertEqual(resp.status_code, expected_status)
-            if expected_status == 429:
-                self.assertIn("retry-after", resp.headers)
+        r2 = call_asgi(
+            rl_app,
+            "GET",
+            "/api/v1/rnc/130663041",
+            headers={"X-Forwarded-For": "2.2.2.2"},
+        )
+        self.assertEqual(r2.status_code, 200)
+
+        r3 = call_asgi(
+            rl_app,
+            "GET",
+            "/api/v1/rnc/130663041",
+            headers={"X-Forwarded-For": "3.3.3.3"},
+        )
+        self.assertEqual(r3.status_code, 429)
+        self.assertIn("retry-after", r3.headers)
 
         # Con trust_proxy_headers=True separa clientes según X-Forwarded-For
         proxy_app, _ = _build_test_app(
@@ -433,7 +396,7 @@ class TestApiEndpoints(unittest.TestCase):
         )
 
     def test_sync_loopback_protection_and_status_sanitization(self) -> None:
-        # Sin SYNC_API_KEY, solicitudes remotas o proxiadas desde fuera reciben 403
+        # Sin ALLOW_REMOTE_SYNC, solicitudes remotas o proxiadas desde fuera reciben 403
         remote_sync = call_asgi(
             self.app,
             "POST",
@@ -451,10 +414,10 @@ class TestApiEndpoints(unittest.TestCase):
         )
         self.assertEqual(proxied_sync.status_code, 403)
 
-        # Con ALLOW_UNAUTHENTICATED_SYNC=true sí se permite
+        # Con ALLOW_REMOTE_SYNC=true sí se permite
         open_app, _ = _build_test_app(
             [self.sample],
-            api_settings=ApiSettings(allow_unauthenticated_sync=True),
+            api_settings=ApiSettings(allow_remote_sync=True),
         )
         self.assertEqual(
             call_asgi(

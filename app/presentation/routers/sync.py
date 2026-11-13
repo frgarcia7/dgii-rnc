@@ -2,16 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import (
-    APIRouter,
-    BackgroundTasks,
-    Depends,
-    Header,
-    HTTPException,
-    Query,
-    Request,
-    status,
-)
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 
 from app.application.use_cases import SyncRncCatalogUseCase
 from app.core.config import Settings
@@ -19,11 +10,9 @@ from app.domain.exceptions import SyncAlreadyRunningError
 from app.presentation.dependencies import (
     get_settings,
     get_sync_use_case,
-    has_valid_sync_key,
     rate_limit_lookup,
     rate_limit_sync,
-    require_api_key,
-    require_sync_api_key,
+    require_local_sync,
 )
 from app.presentation.rate_limit import is_loopback_request
 from app.presentation.schemas.contribuyente import (
@@ -43,17 +32,13 @@ router = APIRouter(tags=["Sincronización"])
     description=(
         "Descarga el archivo oficial de la DGII en segundo plano utilizando "
         "`BackgroundTasks` y actualiza el padrón en PostgreSQL mediante `UPSERT` por lotes. "
-        "Requiere `SYNC_API_KEY` (o `API_KEY`), o solicitud desde localhost si no hay clave."
+        "Por defecto solo acepta solicitudes locales (localhost) salvo `ALLOW_REMOTE_SYNC=true`."
     ),
-    dependencies=[Depends(rate_limit_sync), Depends(require_sync_api_key)],
+    dependencies=[Depends(rate_limit_sync), Depends(require_local_sync)],
     responses={
-        status.HTTP_401_UNAUTHORIZED: {
-            "model": ErrorResponse,
-            "description": "API key inválida o faltante.",
-        },
         status.HTTP_403_FORBIDDEN: {
             "model": ErrorResponse,
-            "description": "Sincronización manual HTTP deshabilitada o no autorizada.",
+            "description": "Sincronización manual HTTP deshabilitada o bloqueada por origen.",
         },
         status.HTTP_409_CONFLICT: {
             "model": ErrorResponse,
@@ -97,14 +82,11 @@ def trigger_sync(
     description=(
         "Indica si hay una sincronización en curso y muestra el último resultado registrado."
     ),
-    dependencies=[Depends(rate_limit_lookup), Depends(require_api_key)],
+    dependencies=[Depends(rate_limit_lookup)],
 )
 def get_sync_status(
     request: Request,
     use_case: SyncRncCatalogUseCase = Depends(get_sync_use_case),
-    settings: Settings = Depends(get_settings),
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-    authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> SyncResponse:
     latest = use_case.get_latest_run()
     running = use_case.is_running()
@@ -118,11 +100,7 @@ def get_sync_status(
             else "Aún no se ha registrado ninguna sincronización."
         )
     )
-    has_admin_key = has_valid_sync_key(settings, x_api_key, authorization)
-    has_configured_sync_key = bool(settings.api.sync_api_key or settings.api.api_key)
-    allow_internal_details = has_admin_key or (
-        not has_configured_sync_key and is_loopback_request(request)
-    )
+    allow_internal_details = is_loopback_request(request)
     return SyncResponse(
         status=current_status,
         message=message,

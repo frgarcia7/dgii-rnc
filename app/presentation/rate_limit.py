@@ -1,9 +1,7 @@
-"""Rate limiting en memoria por IP/API Key con soporte seguro de proxy headers."""
+"""Rate limiting en memoria por IP con soporte seguro de proxy headers."""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import ipaddress
 import math
 import threading
@@ -193,29 +191,8 @@ def is_loopback_request(request: Request) -> bool:
     return True
 
 
-def _extract_provided_key(request: Request) -> str | None:
-    x_api_key = request.headers.get("x-api-key")
-    if x_api_key and x_api_key.strip():
-        return x_api_key.strip()
-    auth = request.headers.get("authorization")
-    if auth and auth.lower().startswith("bearer "):
-        token = auth[7:].strip()
-        return token or None
-    return None
-
-
-def _is_privileged_api_key(request: Request, settings: Settings) -> bool:
-    provided = _extract_provided_key(request)
-    if not provided:
-        return False
-    for expected in (settings.api.api_key, settings.api.sync_api_key):
-        if expected and hmac.compare_digest(provided, expected):
-            return True
-    return False
-
-
 def enforce_rate_limit(request: Request, bucket: str) -> None:
-    """Aplica rate limiting al bucket solicitado y registra headers X-RateLimit-*."""
+    """Aplica rate limiting por IP al bucket solicitado y registra headers X-RateLimit-*."""
     settings: Settings = request.app.state.settings
     if not settings.rate_limit.enabled:
         return
@@ -232,22 +209,11 @@ def enforce_rate_limit(request: Request, bucket: str) -> None:
         "batch": settings.rate_limit.batch_per_minute,
         "sync": settings.rate_limit.sync_per_minute,
     }
-    base_limit = limits_by_bucket.get(bucket, settings.rate_limit.lookup_per_minute)
-
+    limit = limits_by_bucket.get(bucket, settings.rate_limit.lookup_per_minute)
     client_ip = extract_client_ip(
         request, trust_proxy_headers=settings.rate_limit.trust_proxy_headers
     )
-    if _is_privileged_api_key(request, settings):
-        effective_limit = base_limit * settings.rate_limit.api_key_multiplier
-        key_digest = hashlib.sha256(
-            (_extract_provided_key(request) or "").encode("utf-8")
-        ).hexdigest()[:12]
-        subject = f"key:{key_digest}:{client_ip}"
-    else:
-        effective_limit = base_limit
-        subject = f"ip:{client_ip}"
-
-    decision = limiter.check(bucket=bucket, subject=subject, limit=effective_limit)
+    decision = limiter.check(bucket=bucket, subject=f"ip:{client_ip}", limit=limit)
     headers = decision.to_headers()
     request.state.rate_limit_headers = headers
 

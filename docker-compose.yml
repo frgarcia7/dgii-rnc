@@ -1,0 +1,44 @@
+services:
+  postgres:
+    image: postgres:18
+    container_name: dgii_rnc_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-dgii_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dgii_password}
+      POSTGRES_DB: ${DB_NAME:-dgii_rnc}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-dgii_user} -d ${DB_NAME:-dgii_rnc}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dgii_rnc_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-dgii_user}
+      DB_PASSWORD: ${DB_PASSWORD:-dgii_password}
+      DB_NAME: ${DB_NAME:-dgii_rnc}
+      SYNC_HOUR: ${SYNC_HOUR:-3}
+      SYNC_MINUTE: ${SYNC_MINUTE:-0}
+      TZ: ${TZ:-America/Santo_Domingo}
+    ports:
+      - "8000:8000"
+
+volumes:
+  postgres_data:
+

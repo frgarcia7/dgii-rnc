@@ -1,0 +1,44 @@
+# Entornos y secretos
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Testing / Linters / Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Datos descargados / temporales / logs
+*.zip
+*.log
+*.dump
+*.sql
+DGII_RNC.*
+RNC_Contribuyentes*
+
+# Docker / volúmenes locales (si se usan bind mounts)
+postgres_data/
+pgdata/
+
+# IDEs y sistema operativo (macOS)
+.DS_Store
+._*
+.vscode/
+.idea/
+*.swp
+*.swo
+
